@@ -1,165 +1,119 @@
-# pqcrypto_layer.py - MOCK Post-Quantum Cryptography Layer
+# pqcrypto_layer.py
+# ---------------------------------------------------------------------
+# Quantum-Resistant Crypto Layer built on QuantCrypt
+# ML-KEM-768 (FIPS 203) + ML-DSA-65 (FIPS 204)
+# ---------------------------------------------------------------------
 
-import os
-import secrets
-import logging
-from typing import Dict, Tuple, Optional
+import base64, json, os
+from typing import Dict, Tuple
+from quantcrypt.kem import MLKEM_768
+from quantcrypt.dss import MLDSA_65
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.exceptions import InvalidTag
-import sys
-import hashlib  # <--- USED FOR DETERMINISTIC KEY MOCK
+from cryptography.hazmat.primitives import hashes
 
-# NOTE: Mocking qrng.py fallback for stability
-try:
-    # Attempt to import for use if available
-    from .qrng import qrandom_key_bytes
-except ImportError:
-    # Fallback to os.urandom if qrng.py is not set up
-    logging.warning("Falling back to os.urandom for key generation.")
+# ---------------------------------------------------------------------
+# Helper: Base64 encode/decode
+# ---------------------------------------------------------------------
+def _b64e(b: bytes) -> str:
+    return base64.b64encode(b).decode("ascii")
 
-    def qrandom_key_bytes(n):
-        return os.urandom(n)
+def _b64d(s: str) -> bytes:
+    if s is None:
+        raise ValueError("Missing required base64 field")
+    return base64.b64decode(s.encode("ascii"))
 
+# ---------------------------------------------------------------------
+# 1️⃣  KEM Key Generation (ML-KEM-768)
+# ---------------------------------------------------------------------
+def generate_kem_keypair() -> Tuple[bytes, bytes, str]:
+    kem = MLKEM_768()
+    pk, sk = kem.keygen()
+    return pk, sk, "ML-KEM-768"
 
-# --- Mock Constants (Simulating Real PQC Sizes) ---
-KYBER_PK_SIZE = 800
-KYBER_SK_SIZE = 1184
-KYBER_CT_SIZE = 768
-KYBER_SYM_KEY_SIZE = 32  # AES-256 Key Size
-DILITHIUM_PK_SIZE = 1312
-DILITHIUM_SK_SIZE = 2416
-DILITHIUM_SIG_SIZE = 2420
-AES_GCM_NONCE_SIZE = 12
+# ---------------------------------------------------------------------
+# 2️⃣  Signature Key Generation (ML-DSA-65)
+# ---------------------------------------------------------------------
+def generate_sig_keypair() -> Tuple[bytes, bytes, str]:
+    sig = MLDSA_65()
+    pk, sk = sig.keygen()
+    return pk, sk, "ML-DSA-65"
 
-
-# --- Kyber KEM Primitives (Mocking PQC Operations) ---
-def kyber_generate_keypair() -> Tuple[bytes, bytes]:
-    """Generates a mock Kyber key pair."""
-    return qrandom_key_bytes(KYBER_PK_SIZE), qrandom_key_bytes(KYBER_SK_SIZE)
-
-
-def kyber_encapsulate(public_key: bytes) -> Tuple[bytes, bytes]:
-    """
-    Mock Kyber encapsulation: Generates a ciphertext (KEM CT) and a shared secret key (K).
-    AGENT SIDE FIX: Shared key is derived deterministically from the public key hash.
-    """
-    # MOCK FIX: Derive shared key deterministically from the public key hash
-    shared_secret_key = hashlib.sha256(public_key).digest()[:KYBER_SYM_KEY_SIZE]
-
-    # 2. Generate the ciphertext blob
-    ciphertext_blob = qrandom_key_bytes(KYBER_CT_SIZE)
-
-    # Debug print for agent side
-    logging.info(
-        f"[Encrypt] KEM shared secret (first 16 bytes): {shared_secret_key[:16].hex()}"
-    )
-
-    return ciphertext_blob, shared_secret_key
-
-
-# --- Dilithium Signature Primitives (Mocking PQC Operations) ---
-def dilithium_generate_keypair() -> Tuple[bytes, bytes]:
-    """Generates a mock Dilithium key pair."""
-    return qrandom_key_bytes(DILITHIUM_PK_SIZE), qrandom_key_bytes(DILITHIUM_SK_SIZE)
-
-
-def dilithium_sign(secret_key: bytes, message: bytes) -> bytes:
-    """Mock Dilithium signing operation."""
-    return qrandom_key_bytes(DILITHIUM_SIG_SIZE)
-
-
-def dilithium_verify(public_key: bytes, message: bytes, signature: bytes) -> bool:
-    """Mock Dilithium verification operation."""
-    # Simulates verification: 99.9% success rate
-    return secrets.randbelow(1000) != 0
-
-
-# --- Composite PQC + Symmetric Encryption Wire Functions ---
-
-
+# ---------------------------------------------------------------------
+# 3️⃣  Encrypt payload with KEM + AES-GCM
+# ---------------------------------------------------------------------
 def encrypt_payload_with_kem(
-    server_pk: bytes, plaintext_bytes: bytes, aad: bytes = b""
-) -> Dict[str, bytes]:
-    """AGENT SIDE: Uses Kyber KEM and AES-256 GCM."""
-    kem_ciphertext, shared_key = kyber_encapsulate(server_pk)
-    aesgcm = AESGCM(shared_key)
-    nonce = qrandom_key_bytes(AES_GCM_NONCE_SIZE)
-    ciphertext_with_tag = aesgcm.encrypt(nonce, plaintext_bytes, aad)
+    plaintext: bytes, kem_public_key: bytes, aad: Dict, kem_alg: str = "ML-KEM-768"
+) -> Dict:
+    kem = MLKEM_768()
+    ciphertext, shared_secret = kem.encaps(kem_public_key)
+
+    # derive AES-GCM key from shared_secret (32 bytes)
+    aes_key = shared_secret[:32]
+    aesgcm = AESGCM(aes_key)
+    nonce = os.urandom(12)
+
+    aad_bytes = json.dumps(aad, separators=(",", ":")).encode()
+    ciphertext_enc = aesgcm.encrypt(nonce, plaintext, aad_bytes)
 
     return {
-        "kem_ciphertext": kem_ciphertext,
-        "aes_nonce": nonce,
-        "encrypted_data_with_tag": ciphertext_with_tag,
+        "kem_alg": kem_alg,
+        "kem_ciphertext": _b64e(ciphertext),
+        "nonce": _b64e(nonce),
+        "ciphertext": _b64e(ciphertext_enc),
     }
 
-
+# ---------------------------------------------------------------------
+# 4️⃣  Decrypt payload with KEM + AES-GCM
+# ---------------------------------------------------------------------
 def decrypt_payload_with_kem(
-    server_pk: bytes,
-    server_sk: bytes,
-    encrypted_blob: Dict[str, bytes],
-    aad: bytes = b"",
-) -> Optional[bytes]:
-    """
-    SERVER SIDE: Decapsulates Kyber, recovers shared secret, and decrypts the payload.
-    NOTE: server_sk is included for consistency, but server_pk is used for key recovery mock.
-    """
+    kem_private_key: bytes, package: Dict, aad: Dict
+) -> bytes:
+    kem = MLKEM_768()
+    kem_ct = _b64d(package["kem_ciphertext"])
+    ciphertext = _b64d(package["ciphertext"])
+    nonce = _b64d(package["nonce"])
+
+    # 🔥 FIX: Correct argument order
+    shared_secret = kem.decaps(kem_private_key, kem_ct)
+
+    aes_key = shared_secret[:32]
+    aesgcm = AESGCM(aes_key)
+
+    aad_bytes = json.dumps(aad, separators=(",", ":")).encode()
+    plaintext = aesgcm.decrypt(nonce, ciphertext, aad_bytes)
+    return plaintext
+
+
+# ---------------------------------------------------------------------
+# 5️⃣  Sign message (ML-DSA-65)
+# ---------------------------------------------------------------------
+def sign_and_package_message(message_bytes: bytes, sig_private_key: bytes, sig_alg: str) -> Dict:
+    sig = MLDSA_65()
+    signature = sig.sign(sig_private_key, message_bytes)
+    return {
+        "sig_alg": sig_alg,
+        "signature_b64": _b64e(signature),
+    }
+
+# ---------------------------------------------------------------------
+# 6️⃣  Verify message signature
+# ---------------------------------------------------------------------
+def verify_signed_message(message_bytes: bytes, signature_b64: str, sig_public_key: bytes) -> bool:
     try:
-        # MOCK FIX: Recover the shared key using the server's PK (as the agent used the PK for encapsulation)
-        shared_key_recovered = hashlib.sha256(server_pk).digest()[:KYBER_SYM_KEY_SIZE]
+        signature = _b64d(signature_b64)
+        sig = MLDSA_65()
+        return sig.verify(sig_public_key, message_bytes, signature)
+    except Exception:
+        return False
 
-        aesgcm = AESGCM(shared_key_recovered)
+# ---------------------------------------------------------------------
+# 7️⃣  Optional: Hash utility
+# ---------------------------------------------------------------------
+def sha3_256(data: bytes) -> str:
+    digest = hashes.Hash(hashes.SHA3_256())
+    digest.update(data)
+    return digest.finalize().hex()
 
-        # Decrypt the combined ciphertext + tag
-        plaintext_bytes = aesgcm.decrypt(
-            encrypted_blob["aes_nonce"], encrypted_blob["encrypted_data_with_tag"], aad
-        )
-        return plaintext_bytes
-
-    except InvalidTag:
-        # CRITICAL DEBUG LINE: Catches AAD Mismatch or Wrong Key
-        logging.error(
-            "SERVER CRYPTO ERROR: AES-GCM authentication tag is invalid (AAD mismatch or wrong key/data)."
-        )
-        return None
-    except Exception as e:
-        logging.error(
-            f"SERVER CRYPTO ERROR: Unexpected error in KEM/AES-GCM process: {e}"
-        )
-        return None
-
-
-def sign_and_package_message(agent_sk: bytes, message: bytes) -> Dict[str, bytes]:
-    """
-    AGENT SIDE: Signs the raw message with Dilithium.
-    Returns: {message (original bytes), signature}
-    """
-    signature = dilithium_sign(agent_sk, message)
-    return {"message": message, "signature": signature}
-
-
-def verify_packaged_message(
-    agent_pk: bytes, package: Dict
-) -> Tuple[Optional[bytes], bool]:
-    """
-    SERVER SIDE: Verifies the Dilithium signature on the message.
-    """
-
-    # The package signature is a hex string from the transmission format. Convert back to bytes.
-    try:
-        signature_bytes = bytes.fromhex(package["signature"])
-    except ValueError:
-        logging.error("Verification ERROR: Signature is not valid hex.")
-        return None, False
-
-    is_verified = dilithium_verify(
-        agent_pk,
-        package["message"],  # This is the raw message bytes recovered after decryption
-        signature_bytes,
-    )
-
-    if is_verified:
-        return package["message"], True
-    else:
-        # NOTE: Dilithium verify mock has a small chance of failing even with correct data.
-        logging.warning("Verification ERROR: Dilithium verification failed.")
-        return None, False
+# ---------------------------------------------------------------------
+# End of file
+# ---------------------------------------------------------------------
