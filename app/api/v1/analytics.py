@@ -222,7 +222,8 @@ async def get_performance_ranking(
         pipeline[1]["$group"]["_id"] = "$Police_Station"
         pipeline[2]["$project"]["police_station"] = "$_id"
 
-    pipeline[2]["$project"].pop("category")
+    # --- FIX: REMOVED THE LINE CAUSING THE KeyError ---
+    # pipeline[2]["$project"].pop("category")
 
     try:
         results = list(db["conviction_cases"].aggregate(pipeline))

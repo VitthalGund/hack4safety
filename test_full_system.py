@@ -2,7 +2,7 @@ import pytest
 import httpx
 import json
 import time
-import uuid  # <-- FIX #1: IMPORT UUID
+import uuid
 from typing import Dict, Any
 
 # Import PQC crypto layer to create a mock agent
@@ -16,13 +16,15 @@ from app.pqc.pqcrypto_layer import (
 # --- CONFIGURATION ---
 BASE_URL = "http://127.0.0.1:8000"
 
-# <-- FIX #2: USE THE DEFAULT ADMIN CREDENTIALS FROM YOUR .env FILE
 DEFAULT_ADMIN = {"username": "admin", "password": "admin_password123"}
 # These are the users to be created
 ADMIN_USER = {"username": "admin_user", "password": "admin_password123"}
 SP_USER = {"username": "sp_balasore", "password": "sp_password123"}
 IIC_USER = {"username": "iic_djbalasore", "password": "iic_password123"}
 AGENT_ID = "test_agent_001"
+
+# --- FIX: CREATE ONE PERSISTENT KEYPAIR FOR THE TEST AGENT ---
+AGENT_SIG_PUB, AGENT_SIG_PRIV, _ = generate_sig_keypair()
 
 # This holds the tokens for all tests
 auth_tokens = {}
@@ -115,8 +117,6 @@ def test_02_create_users(client):
     """Test 2: Create Admin, SP, and IIC users."""
     print("--- Test 02: Creating Test Users ---")
 
-    # <-- FIX #3: LOG IN AS THE *DEFAULT* ADMIN
-    # This user should now exist thanks to the auth.py startup event
     try:
         admin_token = get_token(
             client, DEFAULT_ADMIN["username"], DEFAULT_ADMIN["password"]
@@ -225,8 +225,8 @@ def test_04_admin_pqc_endpoints(client):
     assert response.json()["status"] == "Key rotation successful"
 
     # 4c: Register a new PQC agent (TODO 3)
-    sig_pub, sig_priv, _ = generate_sig_keypair()
-    agent_payload = {"agent_id": AGENT_ID, "dilithium_pk_hex": sig_pub.hex()}
+    # --- FIX: USE THE PERSISTENT GLOBAL PUBLIC KEY ---
+    agent_payload = {"agent_id": AGENT_ID, "dilithium_pk_hex": AGENT_SIG_PUB.hex()}
     response = client.post(
         "/api/v1/pqc/register_agent", json=agent_payload, headers=headers
     )
@@ -248,13 +248,12 @@ def test_05_secure_ingestion(client):
     server_pk = bytes.fromhex(server_pk_hex)
 
     # 5b: Ingest Case 1 (BALASORE)
-    sig_pub, sig_priv, _ = (
-        generate_sig_keypair()
-    )  # We don't need this, agent is registered
+    # --- FIX: REMOVED LOCAL KEY GENERATION. WE USE THE GLOBAL KEY ---
 
     case1_id = f"BAL-TEST-{int(time.time())}"
     CASE_DATA_1["Case_Number"] = case1_id
-    pkg1 = create_secure_package(CASE_DATA_1, server_pk, key_id, sig_priv)
+    # --- FIX: SIGN WITH THE PERSISTENT GLOBAL PRIVATE KEY ---
+    pkg1 = create_secure_package(CASE_DATA_1, server_pk, key_id, AGENT_SIG_PRIV)
 
     response = client.post("/api/v1/cases/secure_ingest", json=pkg1)
     assert response.status_code == 200
@@ -264,7 +263,8 @@ def test_05_secure_ingestion(client):
     # 5c: Ingest Case 2 (CUTTACK)
     case2_id = f"CUT-TEST-{int(time.time())}"
     CASE_DATA_2["Case_Number"] = case2_id
-    pkg2 = create_secure_package(CASE_DATA_2, server_pk, key_id, sig_priv)
+    # --- FIX: SIGN WITH THE PERSISTENT GLOBAL PRIVATE KEY ---
+    pkg2 = create_secure_package(CASE_DATA_2, server_pk, key_id, AGENT_SIG_PRIV)
 
     response = client.post("/api/v1/cases/secure_ingest", json=pkg2)
     assert response.status_code == 200
@@ -318,6 +318,7 @@ def test_06_role_based_access_sp(client):
     assert len(response.json()) == 0
 
     # 6c: Get BALASORE case by ID (should pass)
+    # This assertion will now pass because test_05 passes and created_case_id is set
     assert created_case_id is not None
     response = client.get(f"/api/v1/cases/{created_case_id}", headers=headers)
     assert response.status_code == 200
@@ -330,7 +331,11 @@ def test_06_role_based_access_sp(client):
     search_resp = client.get(
         "/api/v1/cases/search?district=CUTTACK", headers=admin_headers
     )
-    cuttack_case_id = search_resp.json()[0]["_id"]
+    # We must ensure the search finds the case we just ingested
+    cuttack_case = next(
+        r for r in search_resp.json() if r["Case_Number"].startswith("CUT-TEST-")
+    )
+    cuttack_case_id = cuttack_case["_id"]
 
     response = client.get(f"/api/v1/cases/{cuttack_case_id}", headers=headers)
     assert response.status_code == 403  # Forbidden
@@ -376,6 +381,7 @@ def test_08_analytics_endpoints(client):
         "/api/v1/analytics/performance/ranking?group_by=Investigating_Officer",
         headers=headers,
     )
+    # This will now pass once analytics.py is fixed
     assert response.status_code == 200
 
 
@@ -391,6 +397,7 @@ def test_09_insights_endpoint(client):
     if response.status_code == 400:
         print("Note: AI Insights test skipped (not enough data).")
     else:
+        # This will now pass because test_05 ingested both Conviction and Acquitted cases
         assert response.status_code == 200
         assert "factors_promoting_conviction" in response.json()
 
