@@ -11,6 +11,7 @@ from app.api.v1 import pqc_endpoints
 from app.api.v1 import cases
 from app.api.v1 import auth
 from app.api.v1 import analytics
+from app.api.v1 import insights
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -46,13 +47,13 @@ app.include_router(pqc_endpoints.router, prefix="/api/v1/pqc", tags=["PQC Manage
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
 app.include_router(cases.router, prefix="/api/v1/cases", tags=["Case Management"])
 app.include_router(analytics.router, prefix="/api/v1/analytics", tags=["Analytics"])
+app.include_router(insights.router, prefix="/api/v1/insights", tags=["AI Insights"])
 
 
 @app.get("/", tags=["Health Check"])
 async def read_root():
     """
     Simple health check and instruction route.
-    (This replaces the root route from your api_server.py)
     """
     return {
         "status": "Quantum-Safe Conviction Data Server Running.",
