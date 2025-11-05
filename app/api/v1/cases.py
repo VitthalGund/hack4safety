@@ -3,9 +3,11 @@ import logging
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from pymongo.database import Database
+from typing import Dict, Any
 
 from app.db.session import get_mongo_db
-from app.pqc.secure_server import pqc_server
+
+from app.pqc.secure_server import server_core as pqc_server
 
 router = APIRouter()
 log = logging.getLogger(__name__)
@@ -13,11 +15,12 @@ log = logging.getLogger(__name__)
 
 class SecureWirePackage(BaseModel):
     agent_id: str
-    key_id: str
+    key_id: int
     kem_ciphertext: str
-    aes_nonce: str
-    encrypted_data_with_tag: str
+    nonce: str
+    ciphertext: str
     signature: str
+    aad: Dict[str, Any]
 
 
 @router.post("/secure_ingest", summary="Receive a PQC-secured conviction record")
@@ -26,24 +29,19 @@ async def secure_ingest_case(
 ):
     """
     This endpoint is the secure entry point for all agent data.
-    It corresponds to the /receive_message route from your original api_server.py
+    It corresponds to the /receive_message route.
     """
     try:
-        message_string, is_verified = pqc_server.process_secure_message(
-            package.model_dump()
-        )
+        result = pqc_server.process_secure_message(package.model_dump())
 
-        if not is_verified:
-            log.warning(
-                f"Ingestion failed: PQC verification failed for agent {package.agent_id}"
-            )
+        if result.get("status") != "ok":
+            log.warning(f"Ingestion failed: {result.get('error')}")
             raise HTTPException(
-                status_code=400,
-                detail="Failed to decrypt or verify message. Check Key ID, AAD, or signature.",
+                status_code=400, detail=f"PQC processing failed: {result.get('error')}"
             )
 
         try:
-            case_data = json.loads(message_string)
+            case_data = json.loads(result["plaintext"])
         except json.JSONDecodeError:
             log.error(f"Ingestion failed: Decrypted payload was not valid JSON.")
             raise HTTPException(
@@ -53,7 +51,7 @@ async def secure_ingest_case(
 
         # 3. Save the data to MongoDB
         collection = db["conviction_cases"]
-        insert_result = await collection.insert_one(case_data)
+        insert_result = collection.insert_one(case_data)
 
         log.info(
             f"Successfully ingested case {case_data.get('Case_Number')} from agent {package.agent_id}"

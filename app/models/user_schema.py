@@ -21,5 +21,5 @@ class User(Base):
     hashed_password = Column(String, nullable=False)
     full_name = Column(String)
     role = Column(SQLEnum(UserRole), nullable=False)
-    district = Column(String, index=True)  # For SP/SDPO level filtering
-    police_station = Column(String, index=True)  # For IIC level filtering
+    district = Column(String, index=True, nullable=True)  # For SP/SDPO
+    police_station = Column(String, index=True, nullable=True)  # For IIC

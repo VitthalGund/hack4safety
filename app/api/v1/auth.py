@@ -59,7 +59,7 @@ async def on_startup():
         await conn.run_sync(Base.metadata.create_all)
 
 
-@router.post("/token", response_model=Token)
+@router.post("/token", response_model=Token, summary="User login for JWT token")
 async def login_for_access_token(
     form_data: OAuth2PasswordRequestForm = Depends(),
     session: AsyncSession = Depends(get_pg_session),

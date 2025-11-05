@@ -25,8 +25,9 @@ async def lifespan(app: FastAPI):
     # --- Startup ---
     connect_to_mongo()
     connect_to_postgres()
+    await auth.on_startup()
 
-    yield  
+    yield
 
     log.info("--- Shutting Down Server ---")
     close_mongo_connection()
@@ -41,6 +42,8 @@ app = FastAPI(
 )
 
 app.include_router(pqc_endpoints.router, prefix="/api/v1/pqc", tags=["PQC Management"])
+app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
+app.include_router(cases.router, prefix="/api/v1/cases", tags=["Case Management"])
 
 
 @app.get("/", tags=["Health Check"])
@@ -54,14 +57,3 @@ async def read_root():
         "docs": "/docs",
         "pqc_setup": "/api/v1/pqc/setup",
     }
-
-app.include_router(pqc_endpoints.router, prefix="/api/v1/pqc", tags=["PQC Management"])
-app.include_router(cases.router, prefix="/api/v1/cases", tags=["Case Management"]) 
-app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"]) 
-
-@app.get("/", tags=["Health Check"])
-
-# We will add other routers here later (e.g., for cases, auth, analytics)
-# app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
-# app.include_router(cases.router, prefix="/api/v1/cases", tags=["Cases"])
-# app.include_router(analytics.router, prefix="/api/v1/analytics", tags=["Analytics"])

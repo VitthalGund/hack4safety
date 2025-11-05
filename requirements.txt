@@ -8,6 +8,8 @@ oqs==0.10.2
 # For QRNG
 qiskit==1.1.0
 qiskit-aer==0.14.1
+quantcrypt==1.0.1  # The new PQC library
+cryptography==42.0.8 # quantcrypt dependency
 
 # --- Databases ---
 # MongoDB Driver
