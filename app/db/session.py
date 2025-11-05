@@ -44,7 +44,8 @@ def connect_to_postgres():
         db.pg_engine = create_async_engine(
             settings.POSTGRES_URL,
             pool_pre_ping=True,
-            echo=False,  # Set to True for debugging SQL queries
+            echo=False,
+            connect_args={"ssl": "require"},
         )
         db.pg_session_local = sessionmaker(
             bind=db.pg_engine,
