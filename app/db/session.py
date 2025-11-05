@@ -85,6 +85,6 @@ async def get_pg_session() -> AsyncSession:
 
 def get_mongo_db():
     """Dependency to get the MongoDB database instance."""
-    if not db.mongo_db:
+    if db.mongo_db is None:
         raise Exception("MongoDB connection not initialized.")
     return db.mongo_db
