@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
-from app.models.user_schema import User, UserRole, Base
+from app.models.user_schema import User, Base
 from app.db.session import get_pg_session, db
 from app.core.config import settings
 

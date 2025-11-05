@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, Enum as SQLEnum
+from sqlalchemy import Column, String, Integer, Enum as SQLEnum, LargeBinary
 from sqlalchemy.orm import declarative_base
 import enum
 
@@ -23,3 +23,11 @@ class User(Base):
     role = Column(SQLEnum(UserRole), nullable=False)
     district = Column(String, index=True, nullable=True)  # For SP/SDPO
     police_station = Column(String, index=True, nullable=True)  # For IIC
+
+
+class Agent(Base):
+    __tablename__ = "agents"
+
+    id = Column(Integer, primary_key=True, index=True)
+    agent_id = Column(String, unique=True, index=True, nullable=False)
+    dilithium_pk = Column(LargeBinary, nullable=False)
