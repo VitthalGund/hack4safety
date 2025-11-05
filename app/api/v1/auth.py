@@ -4,19 +4,18 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import sessionmaker
 from pydantic import BaseModel
 from jose import JWTError, jwt
-from passlib.context import CryptContext
+from bcrypt import hashpw, gensalt, checkpw, _bcrypt
 
-from app.models.user_schema import User, UserRole, Base, Agent
+from app.models.user_schema import User, UserRole, Base
 from app.db.session import get_pg_session, db
 from app.core.config import settings
 from typing import Optional
 
 router = APIRouter()
 log = logging.getLogger(__name__)
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
 
 
@@ -39,12 +38,12 @@ class UserCreate(BaseModel):
     police_station: Optional[str] = None
 
 
-def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
+def verify_password(plain_password: str, hashed_password_str: str) -> bool:
+    return checkpw(plain_password.encode("utf-8"), hashed_password_str.encode("utf-8"))
 
 
-def get_password_hash(password):
-    return pwd_context.hash(password)
+def get_password_hash(password: str) -> str:
+    return hashpw(password.encode("utf-8"), gensalt(12)).decode("utf-8")
 
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None):
@@ -62,11 +61,65 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
     return encoded_jwt
 
 
+async def create_default_admin():
+    """
+    Checks for a default admin user on startup and creates one
+    if it doesn't exist, using credentials from settings.
+    """
+    log.info("Checking for default admin user...")
+
+    # Create a new session for this startup task
+    async_session_maker = sessionmaker(
+        db.pg_engine, class_=AsyncSession, expire_on_commit=False
+    )
+
+    async with async_session_maker() as session:
+        async with session.begin():
+            # Check if the specific default admin exists
+            result = await session.execute(
+                select(User).where(User.username == settings.DEFAULT_ADMIN_USER)
+            )
+            admin_user = result.scalars().first()
+
+            if admin_user:
+                log.info(
+                    f"Default admin user '{settings.DEFAULT_ADMIN_USER}' already exists."
+                )
+                return
+
+            # If no admin exists, create one
+            if not settings.DEFAULT_ADMIN_USER or not settings.DEFAULT_ADMIN_PASS:
+                log.error(
+                    "DEFAULT_ADMIN_USER or DEFAULT_ADMIN_PASS not set. Cannot create default admin."
+                )
+                return
+
+            log.info(f"Creating default admin user: {settings.DEFAULT_ADMIN_USER}")
+
+            hashed_password = get_password_hash(settings.DEFAULT_ADMIN_PASS)
+            default_admin = User(
+                username=settings.DEFAULT_ADMIN_USER,
+                hashed_password=hashed_password,
+                full_name="Default Admin",
+                role=UserRole.ADMIN,
+                district="STATE_HQ",  # Or any default
+            )
+            session.add(default_admin)
+            await session.commit()
+            log.info(
+                f"Successfully created default admin user: {settings.DEFAULT_ADMIN_USER}"
+            )
+        await session.close()
+
+
 @router.on_event("startup")
 async def on_startup():
     """Create all tables (User, Agent) on startup."""
     async with db.pg_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    # After tables are created, create the default admin
+    await create_default_admin()
 
 
 @router.post("/token", response_model=Token, summary="User login for JWT token")

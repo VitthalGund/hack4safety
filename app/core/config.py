@@ -13,11 +13,12 @@ class Settings(BaseSettings):
     JWT_SECRET_KEY: str
     JWT_ALGORITHM: str
     ACCESS_TOKEN_EXPIRE_MINUTES: int
+    DEFAULT_ADMIN_USER: str = "admin"
+    DEFAULT_ADMIN_PASS: str = "admin_password123"
 
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
 
 
-# Instantiate the settings
 settings = Settings()

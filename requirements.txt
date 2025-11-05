@@ -23,7 +23,7 @@ sqlalchemy[asyncio]==2.0.31
 # JWT Token Management
 python-jose[cryptography]==3.3.0
 # Password Hashing
-passlib[bcrypt]==1.7.4
+passlib[bcrypt]
 
 # --- AI & Analytics ---
 pandas==2.2.2
