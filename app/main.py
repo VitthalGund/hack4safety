@@ -10,6 +10,7 @@ from app.db.session import (
 from app.api.v1 import pqc_endpoints
 from app.api.v1 import cases
 from app.api.v1 import auth
+from app.api.v1 import analytics
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ app = FastAPI(
 app.include_router(pqc_endpoints.router, prefix="/api/v1/pqc", tags=["PQC Management"])
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
 app.include_router(cases.router, prefix="/api/v1/cases", tags=["Case Management"])
+app.include_router(analytics.router, prefix="/api/v1/analytics", tags=["Analytics"])
 
 
 @app.get("/", tags=["Health Check"])
