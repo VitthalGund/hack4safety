@@ -29,16 +29,23 @@ async def setup():
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {e}")
 
 
-@router.post("/register_agent", summary="Register an Agent's PQC Public Key")
+@router.post("/register_agent", summary="[Admin] Register an Agent's PQC Public Key")
 async def register_agent(
     agent_data: AgentRegistration,
     session: AsyncSession = Depends(get_pg_session),
-    # TODO: This should be protected by an admin route too
+    current_user: User = Depends(get_current_user),
 ):
     """
     Endpoint for a Secure Agent to register its Dilithium Public Key.
     Saves the agent's key to the PostgreSQL database.
+    Only accessible by ADMIN users.
     """
+    if current_user.role != UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to register agents.",
+        )
+
     try:
         # Check if agent already exists
         result = await session.execute(
@@ -67,6 +74,7 @@ async def register_agent(
             status_code=400, detail="Invalid hex format for public key."
         )
     except Exception as e:
+        await session.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to register agent: {e}")
 
 

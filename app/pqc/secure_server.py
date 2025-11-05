@@ -20,7 +20,7 @@ class SecureWireServer:
     def __init__(self):
         self.kem_pub, self.kem_priv, self.kem_alg = generate_kem_keypair()
         self.key_id = 1
-        self.agent_pubkeys = {}  # agent_id -> Dilithium public key
+        # self.agent_pubkeys = {}  <-- REMOVED (Moved to DB)
         log.info(f"[SERVER] Initialized with {self.kem_alg} (Key ID {self.key_id})")
 
     # -------------------------------------------------------------
@@ -28,9 +28,8 @@ class SecureWireServer:
         return {"server_public_key": self.kem_pub.hex(), "key_id": self.key_id}
 
     # -------------------------------------------------------------
-    def register_agent(self, agent_id, dilithium_pk_hex):
-        self.agent_pubkeys[agent_id] = bytes.fromhex(dilithium_pk_hex)
-        log.info(f"[SERVER] Registered agent: {agent_id}")
+    # def register_agent(self, agent_id, dilithium_pk_hex): <-- REMOVED
+    #     This logic is now in pqc_endpoints.py
 
     # -------------------------------------------------------------
     def rotate_keys(self):
@@ -40,7 +39,8 @@ class SecureWireServer:
         return self.get_server_public_key()
 
     # -------------------------------------------------------------
-    def process_secure_message(self, package: dict):
+    # --- MODIFIED: Must now be given the agent's key ---
+    def process_secure_message(self, package: dict, agent_pubkey: bytes):
         try:
             # --- Validate presence of critical fields ---
             required = [
@@ -62,9 +62,6 @@ class SecureWireServer:
             signature = package["signature"]
             aad = package.get("aad", {})
 
-            if agent_id not in self.agent_pubkeys:
-                raise ValueError(f"❌ Unknown agent ID: {agent_id}")
-
             # --- Decrypt payload ---
             dec_package = {
                 "kem_ciphertext": kem_ct,
@@ -77,8 +74,9 @@ class SecureWireServer:
             ).decode("utf-8")
 
             # --- Verify signature ---
+            # Use the provided agent_pubkey
             verified = verify_signed_message(
-                plaintext.encode(), signature, self.agent_pubkeys[agent_id]
+                plaintext.encode(), signature, agent_pubkey
             )
             if not verified:
                 raise ValueError("❌ Signature verification failed")
@@ -99,5 +97,3 @@ class SecureWireServer:
 # Create the singleton instance that all API routers will import
 # ---------------------------------------------------------------------
 server_core = SecureWireServer()
-
-# --- All old Flask routes and __main__ block are removed ---

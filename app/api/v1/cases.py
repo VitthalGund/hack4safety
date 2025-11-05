@@ -53,7 +53,7 @@ async def secure_ingest_case(
     It fetches the agent's key from Postgres, then verifies the payload.
     """
     try:
-        # --- TODO 3 IMPLEMENTED ---
+        # --- TODO 3 IMPLEMENTED (Part 2) ---
         # 1. Fetch agent's public key from PostgreSQL
         result = await pg_session.execute(
             select(Agent).where(Agent.agent_id == package.agent_id)
@@ -147,6 +147,8 @@ async def search_cases(
     if result:
         query["Result"] = result
 
+    # --- TODO 1 IMPLEMENTED ---
+    # Apply role-based filtering
     if current_user.role == UserRole.SP:
         # SP can only see cases in their assigned District
         if district and district != current_user.district:
@@ -196,6 +198,8 @@ async def get_case_by_id(
     if case is None:
         raise HTTPException(status_code=404, detail="Case not found")
 
+    # --- TODO 2 IMPLEMENTED ---
+    # Check role-based access
     if current_user.role == UserRole.SP:
         if case.get("District") != current_user.district:
             raise HTTPException(

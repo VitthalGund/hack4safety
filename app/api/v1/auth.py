@@ -8,9 +8,10 @@ from pydantic import BaseModel
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
-from app.models.user_schema import User, Base
+from app.models.user_schema import User, UserRole, Base, Agent
 from app.db.session import get_pg_session, db
 from app.core.config import settings
+from typing import Optional
 
 router = APIRouter()
 log = logging.getLogger(__name__)
@@ -27,6 +28,15 @@ class Token(BaseModel):
 class TokenData(BaseModel):
     username: str | None = None
     role: str | None = None
+
+
+class UserCreate(BaseModel):
+    username: str
+    password: str
+    full_name: str
+    role: UserRole
+    district: Optional[str] = None
+    police_station: Optional[str] = None
 
 
 def verify_password(plain_password, hashed_password):
@@ -54,7 +64,7 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
 
 @router.on_event("startup")
 async def on_startup():
-    """Create the User table on startup."""
+    """Create all tables (User, Agent) on startup."""
     async with db.pg_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -88,7 +98,8 @@ async def login_for_access_token(
 
 
 async def get_current_user(
-    token: str = Depends(oauth2_scheme), session: AsyncSession = Depends(get_pg_session)
+    token: str = Depends(oauth2_scheme),
+    session: AsyncSession = Depends(get_pg_session),
 ):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -128,3 +139,46 @@ async def read_users_me(current_user: User = Depends(get_current_user)):
         "district": current_user.district,
         "police_station": current_user.police_station,
     }
+
+
+@router.post(
+    "/users/create",
+    summary="[Admin] Create a new user",
+    status_code=status.HTTP_201_CREATED,
+)
+async def register_user(
+    user_in: UserCreate,
+    session: AsyncSession = Depends(get_pg_session),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Create a new user in the database. Only accessible by ADMIN users.
+    """
+    if current_user.role != UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to create users.",
+        )
+
+    result = await session.execute(
+        select(User).where(User.username == user_in.username)
+    )
+    if result.scalars().first():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username already registered",
+        )
+
+    hashed_password = get_password_hash(user_in.password)
+    new_user = User(
+        username=user_in.username,
+        hashed_password=hashed_password,
+        full_name=user_in.full_name,
+        role=user_in.role,
+        district=user_in.district,
+        police_station=user_in.police_station,
+    )
+    session.add(new_user)
+    await session.commit()
+
+    return {"username": new_user.username, "role": new_user.role, "status": "created"}

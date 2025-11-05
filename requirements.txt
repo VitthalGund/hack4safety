@@ -32,3 +32,6 @@ scikit-learn==1.5.0
 # --- Utilities ---
 # Environment variable management
 pydantic-settings==2.3.4
+
+# --- Testing ---
+pytest==8.4.2

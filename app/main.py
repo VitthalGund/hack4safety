@@ -12,6 +12,7 @@ from app.api.v1 import cases
 from app.api.v1 import auth
 from app.api.v1 import analytics
 from app.api.v1 import insights
+from app.api.v1 import metadata
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
 app.include_router(cases.router, prefix="/api/v1/cases", tags=["Case Management"])
 app.include_router(analytics.router, prefix="/api/v1/analytics", tags=["Analytics"])
 app.include_router(insights.router, prefix="/api/v1/insights", tags=["AI Insights"])
+app.include_router(metadata.router, prefix="/api/v1/metadata", tags=["Metadata"])
 
 
 @app.get("/", tags=["Health Check"])
