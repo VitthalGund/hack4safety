@@ -8,6 +8,8 @@ from app.db.session import (
     close_postgres_connection,
 )
 from app.api.v1 import pqc_endpoints
+from app.api.v1 import cases
+from app.api.v1 import auth
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -24,15 +26,13 @@ async def lifespan(app: FastAPI):
     connect_to_mongo()
     connect_to_postgres()
 
-    yield  # Application is now running
+    yield  
 
-    # --- Shutdown ---
     log.info("--- Shutting Down Server ---")
     close_mongo_connection()
     await close_postgres_connection()
 
 
-# Create the main FastAPI application
 app = FastAPI(
     title="Quantum-Safe Conviction Data Management System",
     description="API for managing conviction data with PQC for transport security.",
@@ -40,8 +40,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# --- Include API Routers ---
-# This includes all routes from pqc_endpoints.py (setup, register, etc.)
 app.include_router(pqc_endpoints.router, prefix="/api/v1/pqc", tags=["PQC Management"])
 
 
@@ -57,6 +55,11 @@ async def read_root():
         "pqc_setup": "/api/v1/pqc/setup",
     }
 
+app.include_router(pqc_endpoints.router, prefix="/api/v1/pqc", tags=["PQC Management"])
+app.include_router(cases.router, prefix="/api/v1/cases", tags=["Case Management"]) 
+app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"]) 
+
+@app.get("/", tags=["Health Check"])
 
 # We will add other routers here later (e.g., for cases, auth, analytics)
 # app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
