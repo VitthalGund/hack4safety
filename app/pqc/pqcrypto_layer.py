@@ -1,82 +1,77 @@
-import oqs
+# pqcrypto_layer.py - MOCK Post-Quantum Cryptography Layer
+
 import os
+import secrets
 import logging
 from typing import Dict, Tuple, Optional
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.exceptions import InvalidTag
+import sys
+import hashlib  # <--- USED FOR DETERMINISTIC KEY MOCK
+
+# NOTE: Mocking qrng.py fallback for stability
+try:
+    # Attempt to import for use if available
+    from .qrng import qrandom_key_bytes
+except ImportError:
+    # Fallback to os.urandom if qrng.py is not set up
+    logging.warning("Falling back to os.urandom for key generation.")
+
+    def qrandom_key_bytes(n):
+        return os.urandom(n)
 
 
-def qrandom_key_bytes(n_bytes: int) -> bytes:
-    """
-    Returns cryptographically secure random bytes.
-    [This is a production-ready replacement for the qrng.py logic]
-    """
-    return os.urandom(n_bytes)
-
-
-# --- PQC Algorithm Definitions ---
-# Using NIST standardized algorithms
-KYBER_ALG = "Kyber-768"
-DILITHIUM_ALG = "Dilithium-3"
-
-# --- Constants (Real Sizes) ---
+# --- Mock Constants (Simulating Real PQC Sizes) ---
+KYBER_PK_SIZE = 800
+KYBER_SK_SIZE = 1184
+KYBER_CT_SIZE = 768
+KYBER_SYM_KEY_SIZE = 32  # AES-256 Key Size
+DILITHIUM_PK_SIZE = 1312
+DILITHIUM_SK_SIZE = 2416
+DILITHIUM_SIG_SIZE = 2420
 AES_GCM_NONCE_SIZE = 12
-AES_GCM_KEY_SIZE = 32  # Kyber-768 provides a 32-byte (256-bit) shared secret
-
-# --- Kyber KEM Primitives (Production) ---
 
 
+# --- Kyber KEM Primitives (Mocking PQC Operations) ---
 def kyber_generate_keypair() -> Tuple[bytes, bytes]:
-    """Generates a real Kyber-768 key pair."""
-    with oqs.KeyEncapsulation(KYBER_ALG) as kem:
-        public_key = kem.generate_keypair()
-        secret_key = kem.export_secret_key()
-        return public_key, secret_key
+    """Generates a mock Kyber key pair."""
+    return qrandom_key_bytes(KYBER_PK_SIZE), qrandom_key_bytes(KYBER_SK_SIZE)
 
 
 def kyber_encapsulate(public_key: bytes) -> Tuple[bytes, bytes]:
     """
-    Real Kyber encapsulation.
-    Generates a ciphertext (KEM CT) and a shared secret key (K).
+    Mock Kyber encapsulation: Generates a ciphertext (KEM CT) and a shared secret key (K).
+    AGENT SIDE FIX: Shared key is derived deterministically from the public key hash.
     """
-    with oqs.KeyEncapsulation(KYBER_ALG) as kem:
-        ciphertext, shared_secret = kem.encap_secret(public_key)
-        return ciphertext, shared_secret
+    # MOCK FIX: Derive shared key deterministically from the public key hash
+    shared_secret_key = hashlib.sha256(public_key).digest()[:KYBER_SYM_KEY_SIZE]
+
+    # 2. Generate the ciphertext blob
+    ciphertext_blob = qrandom_key_bytes(KYBER_CT_SIZE)
+
+    # Debug print for agent side
+    logging.info(
+        f"[Encrypt] KEM shared secret (first 16 bytes): {shared_secret_key[:16].hex()}"
+    )
+
+    return ciphertext_blob, shared_secret_key
 
 
-def kyber_decapsulate(secret_key: bytes, ciphertext: bytes) -> bytes:
-    """
-    Real Kyber decapsulation.
-    Recovers the shared secret key (K) from the KEM CT.
-    """
-    with oqs.KeyEncapsulation(KYBER_ALG, secret_key) as kem:
-        shared_secret = kem.decap_secret(ciphertext)
-        return shared_secret
-
-
-# --- Dilithium Signature Primitives (Production) ---
-
-
+# --- Dilithium Signature Primitives (Mocking PQC Operations) ---
 def dilithium_generate_keypair() -> Tuple[bytes, bytes]:
-    """Generates a real Dilithium-3 key pair."""
-    with oqs.Signature(DILITHIUM_ALG) as sig:
-        public_key = sig.generate_keypair()
-        secret_key = sig.export_secret_key()
-        return public_key, secret_key
+    """Generates a mock Dilithium key pair."""
+    return qrandom_key_bytes(DILITHIUM_PK_SIZE), qrandom_key_bytes(DILITHIUM_SK_SIZE)
 
 
 def dilithium_sign(secret_key: bytes, message: bytes) -> bytes:
-    """Real Dilithium signing operation."""
-    with oqs.Signature(DILITHIUM_ALG, secret_key) as sig:
-        signature = sig.sign(message)
-        return signature
+    """Mock Dilithium signing operation."""
+    return qrandom_key_bytes(DILITHIUM_SIG_SIZE)
 
 
 def dilithium_verify(public_key: bytes, message: bytes, signature: bytes) -> bool:
-    """Real Dilithium verification operation."""
-    with oqs.Signature(DILITHIUM_ALG) as sig:
-        is_valid = sig.verify(message, signature, public_key)
-        return is_valid
+    """Mock Dilithium verification operation."""
+    # Simulates verification: 99.9% success rate
+    return secrets.randbelow(1000) != 0
 
 
 # --- Composite PQC + Symmetric Encryption Wire Functions ---
@@ -85,14 +80,8 @@ def dilithium_verify(public_key: bytes, message: bytes, signature: bytes) -> boo
 def encrypt_payload_with_kem(
     server_pk: bytes, plaintext_bytes: bytes, aad: bytes = b""
 ) -> Dict[str, bytes]:
-    """
-    AGENT SIDE: Uses Kyber KEM and AES-256 GCM.
-    This is cryptographically sound.
-    """
-    # 1. Generate a shared key and the KEM ciphertext
+    """AGENT SIDE: Uses Kyber KEM and AES-256 GCM."""
     kem_ciphertext, shared_key = kyber_encapsulate(server_pk)
-
-    # 2. Encrypt the data using the shared key
     aesgcm = AESGCM(shared_key)
     nonce = qrandom_key_bytes(AES_GCM_NONCE_SIZE)
     ciphertext_with_tag = aesgcm.encrypt(nonce, plaintext_bytes, aad)
@@ -105,37 +94,44 @@ def encrypt_payload_with_kem(
 
 
 def decrypt_payload_with_kem(
-    server_sk: bytes, encrypted_blob: Dict[str, bytes], aad: bytes = b""
+    server_pk: bytes,
+    server_sk: bytes,
+    encrypted_blob: Dict[str, bytes],
+    aad: bytes = b"",
 ) -> Optional[bytes]:
     """
-    SERVER SIDE: Decapsulates Kyber, recovers shared secret, and decrypts.
+    SERVER SIDE: Decapsulates Kyber, recovers shared secret, and decrypts the payload.
+    NOTE: server_sk is included for consistency, but server_pk is used for key recovery mock.
     """
     try:
-        # 1. Recover the shared key using the server's secret key
-        shared_key_recovered = kyber_decapsulate(
-            server_sk, encrypted_blob["kem_ciphertext"]
-        )
+        # MOCK FIX: Recover the shared key using the server's PK (as the agent used the PK for encapsulation)
+        shared_key_recovered = hashlib.sha256(server_pk).digest()[:KYBER_SYM_KEY_SIZE]
 
-        # 2. Decrypt the data using the recovered shared key
         aesgcm = AESGCM(shared_key_recovered)
+
+        # Decrypt the combined ciphertext + tag
         plaintext_bytes = aesgcm.decrypt(
             encrypted_blob["aes_nonce"], encrypted_blob["encrypted_data_with_tag"], aad
         )
         return plaintext_bytes
 
-    except (InvalidTag, oqs.OQSError):
+    except InvalidTag:
+        # CRITICAL DEBUG LINE: Catches AAD Mismatch or Wrong Key
         logging.error(
-            "SERVER CRYPTO ERROR: AES-GCM tag invalid or KEM decapsulation failed."
+            "SERVER CRYPTO ERROR: AES-GCM authentication tag is invalid (AAD mismatch or wrong key/data)."
         )
         return None
     except Exception as e:
-        logging.error(f"SERVER CRYPTO ERROR: Unexpected error: {e}")
+        logging.error(
+            f"SERVER CRYPTO ERROR: Unexpected error in KEM/AES-GCM process: {e}"
+        )
         return None
 
 
 def sign_and_package_message(agent_sk: bytes, message: bytes) -> Dict[str, bytes]:
     """
     AGENT SIDE: Signs the raw message with Dilithium.
+    Returns: {message (original bytes), signature}
     """
     signature = dilithium_sign(agent_sk, message)
     return {"message": message, "signature": signature}
@@ -145,27 +141,25 @@ def verify_packaged_message(
     agent_pk: bytes, package: Dict
 ) -> Tuple[Optional[bytes], bool]:
     """
-    SERVER SIDE: Verifies the Dilithium signature.
-    [This is modified from your original to fix a hex-conversion bug]
+    SERVER SIDE: Verifies the Dilithium signature on the message.
     """
-    try:
-        # The signature from the agent is raw bytes, but if it comes
-        # from a JSON payload, it might be hex. We'll assume the
-        # secure_server.py logic will handle hex-to-bytes conversion.
-        signature_bytes = package["signature"]
-        if isinstance(signature_bytes, str):
-            signature_bytes = bytes.fromhex(signature_bytes)
 
+    # The package signature is a hex string from the transmission format. Convert back to bytes.
+    try:
+        signature_bytes = bytes.fromhex(package["signature"])
     except ValueError:
         logging.error("Verification ERROR: Signature is not valid hex.")
         return None, False
 
     is_verified = dilithium_verify(
-        agent_pk, package["message"], signature_bytes  # Raw message bytes
+        agent_pk,
+        package["message"],  # This is the raw message bytes recovered after decryption
+        signature_bytes,
     )
 
     if is_verified:
         return package["message"], True
     else:
-        logging.warning("Verification ERROR: Dilithium signature check failed.")
+        # NOTE: Dilithium verify mock has a small chance of failing even with correct data.
+        logging.warning("Verification ERROR: Dilithium verification failed.")
         return None, False

@@ -8,6 +8,7 @@ oqs==0.10.2
 # For QRNG
 qiskit==1.1.0
 qiskit-aer==0.14.1
+psycopg2==2.9.11
 
 # --- Databases ---
 # MongoDB Driver
