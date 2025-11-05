@@ -1,0 +1,32 @@
+# --- FastAPI & Server ---
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+
+# --- PQC & Crypto ---
+# oqs-python (replaces your mock crypto)
+oqs==0.10.2
+# For QRNG
+qiskit==1.1.0
+qiskit-aer==0.14.1
+
+# --- Databases ---
+# MongoDB Driver
+pymongo[srv]==4.7.3
+# PostgreSQL Async Driver
+asyncpg==0.29.0
+# SQLAlchemy (Async ORM)
+sqlalchemy[asyncio]==2.0.31
+
+# --- Auth & Security ---
+# JWT Token Management
+python-jose[cryptography]==3.3.0
+# Password Hashing
+passlib[bcrypt]==1.7.4
+
+# --- AI & Analytics ---
+pandas==2.2.2
+scikit-learn==1.5.0
+
+# --- Utilities ---
+# Environment variable management
+pydantic-settings==2.3.4

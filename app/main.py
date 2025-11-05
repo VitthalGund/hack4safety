@@ -1,0 +1,64 @@
+import logging
+from fastapi import FastAPI
+from contextlib import asynccontextmanager
+from app.db.session import (
+    connect_to_mongo,
+    close_mongo_connection,
+    connect_to_postgres,
+    close_postgres_connection,
+)
+from app.api.v1 import pqc_endpoints
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Application lifespan manager.
+    Connects to databases on startup and disconnects on shutdown.
+    """
+    log.info("--- Starting Quantum-Safe Conviction Data Server ---")
+    # --- Startup ---
+    connect_to_mongo()
+    connect_to_postgres()
+
+    yield  # Application is now running
+
+    # --- Shutdown ---
+    log.info("--- Shutting Down Server ---")
+    close_mongo_connection()
+    await close_postgres_connection()
+
+
+# Create the main FastAPI application
+app = FastAPI(
+    title="Quantum-Safe Conviction Data Management System",
+    description="API for managing conviction data with PQC for transport security.",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+# --- Include API Routers ---
+# This includes all routes from pqc_endpoints.py (setup, register, etc.)
+app.include_router(pqc_endpoints.router, prefix="/api/v1/pqc", tags=["PQC Management"])
+
+
+@app.get("/", tags=["Health Check"])
+async def read_root():
+    """
+    Simple health check and instruction route.
+    (This replaces the root route from your api_server.py)
+    """
+    return {
+        "status": "Quantum-Safe Conviction Data Server Running.",
+        "docs": "/docs",
+        "pqc_setup": "/api/v1/pqc/setup",
+    }
+
+
+# We will add other routers here later (e.g., for cases, auth, analytics)
+# app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
+# app.include_router(cases.router, prefix="/api/v1/cases", tags=["Cases"])
+# app.include_router(analytics.router, prefix="/api/v1/analytics", tags=["Analytics"])
