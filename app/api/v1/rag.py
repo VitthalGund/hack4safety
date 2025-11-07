@@ -20,28 +20,43 @@ class RagQuery(BaseModel):
     )
 
 
-@router.post("/ask", summary="Ask the multilingual legal RAG bot")
-async def ask_rag(
-    query: RagQuery,
-    current_user: User = Depends(get_current_user),  # Protected endpoint
+@router.post("/legal", summary="Ask the legal bot (Indian Laws)")
+async def ask_legal_rag(
+    query: RagQuery, current_user: User = Depends(get_current_user)  # Protected
 ):
     """
-    Provides a multilingual, retrieval-augmented answer to a legal query.
-
-    - **Understands:** Most Indian languages (Hindi, Tamil, Telugu, etc.)
-    - **Responds:** In the *same language* it was asked.
-    - **Grounded:** Answers are based *only* on the ingested legal documents.
-    - **Models:** Allows choosing between fast/local (phi-3) or powerful/cloud (gemini).
+    RAG bot for general Indian legal questions.
+    Grounded in the `legal_vectors` collection (IPC, BNS, etc.).
     """
     if not rag_service:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="RAG service is not initialized. Check server logs.",
         )
-
     try:
-        response = await rag_service.ask(query.query, query.model_provider)
+        response = await rag_service.ask_legal_bot(query.query, query.model_provider)
         return response
     except Exception as e:
-        log.error(f"Error in RAG endpoint: {e}")
+        log.error(f"Error in legal RAG endpoint: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/cases", summary="Ask questions about your conviction cases")
+async def ask_cases_rag(
+    query: RagQuery, current_user: User = Depends(get_current_user)  # Protected
+):
+    """
+    RAG bot for your internal conviction case data.
+    Grounded in the `conviction_cases` collection (FIRs, Actions Taken, etc.).
+    """
+    if not rag_service:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="RAG service is not initialized. Check server logs.",
+        )
+    try:
+        response = await rag_service.ask_case_bot(query.query, query.model_provider)
+        return response
+    except Exception as e:
+        log.error(f"Error in cases RAG endpoint: {e}")
         raise HTTPException(status_code=500, detail=str(e))

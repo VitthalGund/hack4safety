@@ -12,7 +12,7 @@ from app.db.session import get_mongo_db, get_pg_session
 from app.pqc.secure_server import server_core as pqc_server
 from app.api.v1.auth import get_current_user
 from app.models.user_schema import User, UserRole, Agent
-from app.core.embedding import embeddings_client
+from app.core.embedding import embeddings_client  # <-- Import shared embedder
 
 router = APIRouter()
 log = logging.getLogger(__name__)
@@ -72,8 +72,8 @@ class CaseOut(BaseModel):
 
 
 class CaseFieldUpdate(BaseModel):
-    field_name: str
-    field_value: Any
+    field_name: str = Field(..., description="The exact name of the field to update.")
+    field_value: Any = Field(..., description="The new value for the field.")
 
 
 @router.post("/secure_ingest", summary="Receive a PQC-secured conviction record")
@@ -87,13 +87,17 @@ async def secure_ingest_case(
     It fetches the agent's key, verifies the payload,
     EMBEDS the content, and saves to MongoDB.
     """
+    if not embeddings_client:
+        raise HTTPException(
+            status_code=503, detail="Embedding service is not available."
+        )
+
     try:
         # 1. Fetch agent's public key from PostgreSQL
         result = await pg_session.execute(
             select(Agent).where(Agent.agent_id == package.agent_id)
         )
         agent = result.scalars().first()
-
         if not agent:
             log.warning(
                 f"Ingestion failed: Agent ID '{package.agent_id}' not registered."
@@ -146,7 +150,6 @@ async def secure_ingest_case(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ... (search_cases endpoint is unchanged) ...
 @router.get(
     "/search",
     response_model=List[CaseOut],
@@ -186,7 +189,7 @@ async def search_cases(
     if result:
         query["Result"] = result
 
-    # Apply role-based filtering
+    # Role-based filtering
     if current_user.role == UserRole.SP:
         # SP can only see cases in their assigned District
         if district and district != current_user.district:
@@ -205,7 +208,9 @@ async def search_cases(
     )
 
     collection = db["conviction_cases"]
-    cases_cursor = collection.find(query).limit(limit)
+    cases_cursor = collection.find(query, {"case_embedding": 0}).limit(
+        limit
+    )  # Exclude embedding
 
     results = []
     for case in cases_cursor:
@@ -264,6 +269,11 @@ async def update_case_field(
     Updates a single field in a case document.
     If a RAG-related field is updated, this regenerates the case embedding.
     """
+    if not embeddings_client:
+        raise HTTPException(
+            status_code=503, detail="Embedding service is not available."
+        )
+
     try:
         obj_id = ObjectId(case_mongo_id)
     except Exception:
@@ -276,15 +286,11 @@ async def update_case_field(
     if case is None:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    # 2. Check permissions (re-using logic from get_full_case)
+    # 2. Check permissions
     if (
         current_user.role == UserRole.SP
         and case.get("District") != current_user.district
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="Access denied."
-        )
-    if (
+    ) or (
         current_user.role == UserRole.IIC
         and case.get("Police_Station") != current_user.police_station
     ):
@@ -303,6 +309,7 @@ async def update_case_field(
         "Accused_Details",
         "Crime_Type",
         "Sections_of_Law",
+        "Result",
     ]
     if update_data.field_name in rag_fields:
         log.info(
@@ -322,3 +329,47 @@ async def update_case_field(
         "matched_count": result.matched_count,
         "modified_count": result.modified_count,
     }
+
+
+@router.delete("/{case_mongo_id}", summary="Delete a case document")
+async def delete_case(
+    case_mongo_id: str,
+    db: Database = Depends(get_mongo_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Deletes a case document. (Primarily for Admin/SP roles).
+    """
+    try:
+        obj_id = ObjectId(case_mongo_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid MongoDB ID format")
+
+    collection = db["conviction_cases"]
+
+    # 1. Get the case to check permissions
+    case = collection.find_one({"_id": obj_id})
+    if case is None:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    # 2. Check permissions
+    if (
+        current_user.role == UserRole.SP
+        and case.get("District") != current_user.district
+    ) or (
+        current_user.role == UserRole.IIC
+        and case.get("Police_Station") != current_user.police_station
+    ):
+        # Only SP, IIC, or Admin can delete. IIC/SP only in their jurisdiction.
+        if current_user.role not in [UserRole.ADMIN, UserRole.SP, UserRole.IIC]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Access denied."
+            )
+
+    # 3. Perform delete
+    result = collection.delete_one({"_id": obj_id})
+
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Case not found during deletion.")
+
+    return {"status": "deleted", "deleted_count": result.deleted_count}
