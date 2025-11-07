@@ -1,4 +1,5 @@
 import logging
+import copy
 from fastapi import APIRouter, Depends, Query
 from pymongo.database import Database
 from typing import List, Dict, Any, Literal
@@ -68,15 +69,15 @@ async def get_conviction_rate(
     grouped by a specified category.
     """
 
-    # Create a deep copy of the pipeline to avoid modifying the original
-    pipeline = [stage.copy() for stage in CONVICTION_PIPELINE_STAGES]
+    # --- 2. FIX: Use deepcopy to prevent mutating the global constant ---
+    pipeline = copy.deepcopy(CONVICTION_PIPELINE_STAGES)
 
     # Dynamically set the group-by field
     pipeline[1]["$group"]["_id"] = f"${group_by}"
 
     # Rename the projected "category" field for clarity
     pipeline[2]["$project"][group_by] = "$_id"
-    pipeline[2]["$project"].pop("category")
+    pipeline[2]["$project"].pop("category")  # This is now safe
 
     try:
         results = list(db["conviction_cases"].aggregate(pipeline))
@@ -208,8 +209,8 @@ async def get_performance_ranking(
     to create a performance leaderboard.
     """
 
-    # Create a deep copy of the pipeline
-    pipeline = [stage.copy() for stage in CONVICTION_PIPELINE_STAGES]
+    # --- 2. FIX: Use deepcopy to prevent mutating the global constant ---
+    pipeline = copy.deepcopy(CONVICTION_PIPELINE_STAGES)
 
     if group_by == "Investigating_Officer":
         # Group by both officer name and rank
@@ -225,8 +226,8 @@ async def get_performance_ranking(
         pipeline[1]["$group"]["_id"] = "$Police_Station"
         pipeline[2]["$project"]["police_station"] = "$_id"
 
-    # --- FIX: REMOVED THE LINE CAUSING THE KeyError ---
-    # pipeline[2]["$project"].pop("category")
+    # --- 3. FIX: Un-comment this line. It's now safe and correct. ---
+    pipeline[2]["$project"].pop("category")
 
     try:
         results = list(db["conviction_cases"].aggregate(pipeline))
