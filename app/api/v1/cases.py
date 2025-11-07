@@ -11,10 +11,39 @@ from sqlalchemy import select
 from app.db.session import get_mongo_db, get_pg_session
 from app.pqc.secure_server import server_core as pqc_server
 from app.api.v1.auth import get_current_user
-from app.models.user_schema import User, UserRole, Agent  # Added UserRole, Agent
+from app.models.user_schema import User, UserRole, Agent
+from app.core.embedding import embeddings_client
 
 router = APIRouter()
 log = logging.getLogger(__name__)
+
+# --- Helper Function for Case RAG ---
+
+
+def _create_case_embedding(case_data: dict) -> List[float]:
+    """Combines key case fields into a single text block and embeds it."""
+    if not embeddings_client:
+        log.error("Embedding client not loaded. Cannot create case embedding.")
+        return []
+
+    # Combine the most descriptive fields for RAG
+    text_to_embed = f"""
+    Case Number: {case_data.get('Case_Number', '')}
+    District: {case_data.get('District', '')}
+    Police Station: {case_data.get('Police_Station', '')}
+    Accused: {case_data.get('Accused_Details', '')}
+    Crime: {case_data.get('Crime_Type', '')}
+    Sections: {case_data.get('Sections_of_Law', '')}
+    FIR Contents: {case_data.get('FIR_Contents', '')}
+    Action Taken: {case_data.get('Action_Taken', '')}
+    Result: {case_data.get('Result', '')}
+    """
+
+    embedding = embeddings_client.embed_query(text_to_embed)
+    return embedding
+
+
+# --- Pydantic Models ---
 
 
 class SecureWirePackage(BaseModel):
@@ -42,18 +71,23 @@ class CaseOut(BaseModel):
         json_encoders = {ObjectId: str}
 
 
+class CaseFieldUpdate(BaseModel):
+    field_name: str
+    field_value: Any
+
+
 @router.post("/secure_ingest", summary="Receive a PQC-secured conviction record")
 async def secure_ingest_case(
     package: SecureWirePackage,
     db: Database = Depends(get_mongo_db),
-    pg_session: AsyncSession = Depends(get_pg_session),  # <-- ADDED
+    pg_session: AsyncSession = Depends(get_pg_session),
 ):
     """
     This endpoint is the secure entry point for all agent data.
-    It fetches the agent's key from Postgres, then verifies the payload.
+    It fetches the agent's key, verifies the payload,
+    EMBEDS the content, and saves to MongoDB.
     """
     try:
-        # --- TODO 3 IMPLEMENTED (Part 2) ---
         # 1. Fetch agent's public key from PostgreSQL
         result = await pg_session.execute(
             select(Agent).where(Agent.agent_id == package.agent_id)
@@ -72,8 +106,9 @@ async def secure_ingest_case(
         agent_pk_bytes = agent.dilithium_pk
 
         # 2. Process the package using the fetched key
-        result = pqc_server.process_secure_message(package.model_dump(), agent_pk_bytes)
-
+        result = pqc_server.process_secure_message(
+            package.model_dump(), agent.dilithium_pk
+        )
         if result.get("status") != "ok":
             log.warning(f"Ingestion failed: {result.get('error')}")
             raise HTTPException(
@@ -89,7 +124,10 @@ async def secure_ingest_case(
                 detail="Data integrity error: Decrypted payload is not valid JSON.",
             )
 
-        # 3. Save the data to MongoDB
+        # 3. --- NEW RAG STEP: Create Embedding ---
+        case_data["case_embedding"] = _create_case_embedding(case_data)
+
+        # 4. Save the data (with embedding) to MongoDB
         collection = db["conviction_cases"]
         insert_result = collection.insert_one(case_data)
 
@@ -108,6 +146,7 @@ async def secure_ingest_case(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ... (search_cases endpoint is unchanged) ...
 @router.get(
     "/search",
     response_model=List[CaseOut],
@@ -147,7 +186,6 @@ async def search_cases(
     if result:
         query["Result"] = result
 
-    # --- TODO 1 IMPLEMENTED ---
     # Apply role-based filtering
     if current_user.role == UserRole.SP:
         # SP can only see cases in their assigned District
@@ -173,12 +211,11 @@ async def search_cases(
     for case in cases_cursor:
         case["_id"] = str(case["_id"])
         results.append(case)
-
     return results
 
 
-@router.get("/{case_mongo_id}", summary="Get a single case by its MongoDB ID")
-async def get_case_by_id(
+@router.get("/{case_mongo_id}", summary="Get a single full case by its MongoDB ID")
+async def get_full_case(
     case_mongo_id: str,
     db: Database = Depends(get_mongo_db),
     current_user: User = Depends(get_current_user),
@@ -198,15 +235,13 @@ async def get_case_by_id(
     if case is None:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    # --- TODO 2 IMPLEMENTED ---
-    # Check role-based access
+    # Role-based access check
     if current_user.role == UserRole.SP:
         if case.get("District") != current_user.district:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied: Case is not in your district.",
             )
-
     elif current_user.role == UserRole.IIC:
         if case.get("Police_Station") != current_user.police_station:
             raise HTTPException(
@@ -216,3 +251,74 @@ async def get_case_by_id(
 
     case["_id"] = str(case["_id"])
     return case
+
+
+@router.put("/{case_mongo_id}/field", summary="Update a field in a case document")
+async def update_case_field(
+    case_mongo_id: str,
+    update_data: CaseFieldUpdate,
+    db: Database = Depends(get_mongo_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Updates a single field in a case document.
+    If a RAG-related field is updated, this regenerates the case embedding.
+    """
+    try:
+        obj_id = ObjectId(case_mongo_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid MongoDB ID format")
+
+    collection = db["conviction_cases"]
+
+    # 1. Get the case
+    case = collection.find_one({"_id": obj_id})
+    if case is None:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    # 2. Check permissions (re-using logic from get_full_case)
+    if (
+        current_user.role == UserRole.SP
+        and case.get("District") != current_user.district
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Access denied."
+        )
+    if (
+        current_user.role == UserRole.IIC
+        and case.get("Police_Station") != current_user.police_station
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Access denied."
+        )
+
+    # 3. Set the new field value
+    update_payload = {"$set": {update_data.field_name: update_data.field_value}}
+    case[update_data.field_name] = update_data.field_value  # Update in-memory copy
+
+    # 4. Check if we need to update the embedding
+    rag_fields = [
+        "FIR_Contents",
+        "Action_Taken",
+        "Accused_Details",
+        "Crime_Type",
+        "Sections_of_Law",
+    ]
+    if update_data.field_name in rag_fields:
+        log.info(
+            f"RAG field updated. Regenerating embedding for case {case_mongo_id}..."
+        )
+        new_embedding = _create_case_embedding(case)
+        update_payload["$set"]["case_embedding"] = new_embedding
+
+    # 5. Perform the update
+    result = collection.update_one({"_id": obj_id}, update_payload)
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Case not found during update.")
+
+    return {
+        "status": "updated",
+        "matched_count": result.matched_count,
+        "modified_count": result.modified_count,
+    }

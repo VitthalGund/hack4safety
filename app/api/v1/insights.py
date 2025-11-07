@@ -110,7 +110,14 @@ async def get_ai_correlation(
     # 6. Format the output
     positive_correlations = corr_df[corr_df["coefficient"] > 0].head(5)
     negative_correlations = corr_df[corr_df["coefficient"] < 0].head(5)
-
+    print(
+        {
+            "analysis_status": "Completed",
+            "records_analyzed": len(df),
+            "factors_promoting_conviction": positive_correlations.to_dict("records"),
+            "factors_promoting_acquittal": negative_correlations.to_dict("records"),
+        }
+    )
     return {
         "analysis_status": "Completed",
         "records_analyzed": len(df),

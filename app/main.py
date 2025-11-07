@@ -13,6 +13,7 @@ from app.api.v1 import auth
 from app.api.v1 import analytics
 from app.api.v1 import insights
 from app.api.v1 import metadata
+from app.api.v1 import rag
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -29,9 +30,7 @@ async def lifespan(app: FastAPI):
     connect_to_mongo()
     connect_to_postgres()
     await auth.on_startup()
-
     yield
-
     log.info("--- Shutting Down Server ---")
     close_mongo_connection()
     await close_postgres_connection()
@@ -50,6 +49,7 @@ app.include_router(cases.router, prefix="/api/v1/cases", tags=["Case Management"
 app.include_router(analytics.router, prefix="/api/v1/analytics", tags=["Analytics"])
 app.include_router(insights.router, prefix="/api/v1/insights", tags=["AI Insights"])
 app.include_router(metadata.router, prefix="/api/v1/metadata", tags=["Metadata"])
+app.include_router(rag.router, prefix="/api/v1/rag", tags=["RAG Legal Bot"])
 
 
 @app.get("/", tags=["Health Check"])

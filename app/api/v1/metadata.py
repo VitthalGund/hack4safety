@@ -41,7 +41,7 @@ async def get_distinct_values(
 
         results = [val for val in values if val]
         results.sort()
-
+        print(results)
         return results
     except Exception as e:
         log.error(f"Failed to get distinct values for {field_name}: {e}")

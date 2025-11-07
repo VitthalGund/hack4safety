@@ -80,6 +80,7 @@ async def get_conviction_rate(
 
     try:
         results = list(db["conviction_cases"].aggregate(pipeline))
+        print(results)
         return results
     except Exception as e:
         log.error(f"Analytics aggregation failed: {e}")
@@ -133,6 +134,7 @@ async def get_avg_durations(
         for key in final_result:
             if key != "_id" and final_result[key]:
                 final_result[key] = round(final_result[key], 1)
+        print(final_result)
         return final_result
     except Exception as e:
         log.error(f"Duration KPI aggregation failed: {e}")
@@ -184,6 +186,7 @@ async def get_case_trends(
     ]
     try:
         results = list(db["conviction_cases"].aggregate(pipeline))
+        print(results)
         return results
     except Exception as e:
         log.error(f"Trends aggregation failed: {e}")
@@ -227,6 +230,7 @@ async def get_performance_ranking(
 
     try:
         results = list(db["conviction_cases"].aggregate(pipeline))
+        print(results)
         return results
     except Exception as e:
         log.error(f"Performance ranking aggregation failed: {e}")

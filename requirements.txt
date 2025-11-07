@@ -29,6 +29,16 @@ passlib[bcrypt]
 pandas==2.2.2
 scikit-learn==1.5.0
 
+# --- NEW RAG LIBRARIES ---
+langchain==0.2.5
+langchain_community==0.2.5
+langchain-mongodb==0.1.7     # For MongoDB Atlas Vector Search
+langchain-google-genai==1.0.6  # For Gemini
+sentence-transformers==2.7.0   # For multilingual embeddings
+ollama==0.2.1                  # For Phi-3
+googletrans-py==4.0.0-rc1      # For language detection
+pypdf==4.2.0                   # To read legal PDFs
+
 # --- Utilities ---
 # Environment variable management
 pydantic-settings==2.3.4
