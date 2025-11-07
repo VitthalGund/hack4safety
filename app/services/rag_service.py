@@ -3,9 +3,9 @@ from fastapi import HTTPException
 from langchain_mongodb import MongoDBAtlasVectorSearch
 from langchain_community.llms import Ollama
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.prompts import PromptTemplate
-from langchain.schema.runnable import RunnablePassthrough
-from langchain.schema.output_parser import StrOutputParser
+from langchain_core.prompts import PromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
 from googletrans import Translator, LANGUAGES
 import pymongo
 
