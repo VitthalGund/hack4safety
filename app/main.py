@@ -1,5 +1,6 @@
 import logging
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.db.session import (
     connect_to_mongo,
@@ -41,6 +42,18 @@ app = FastAPI(
     description="API for managing conviction data with PQC for transport security.",
     version="1.0.0",
     lifespan=lifespan,
+)
+
+# --- 2. ADD CORS MIDDLEWARE ---
+# This block will fix the "cross error" (CORS)
+# WARNING: "allow_origins=["*"]" is for development only.
+# For production, you should list your frontend's domain.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods (GET, POST, PUT, DELETE, etc.)
+    allow_headers=["*"],  # Allows all headers
 )
 
 app.include_router(pqc_endpoints.router, prefix="/api/v1/pqc", tags=["PQC Management"])

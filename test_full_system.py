@@ -418,3 +418,133 @@ def test_10_metadata_endpoints(client):
     assert response.status_code == 200
     assert "Inspector" in response.json()
     assert "ASI" in response.json()
+
+
+# --- ADD THESE NEW TESTS TO THE END OF YOUR test_full_system.py FILE ---
+
+
+@pytest.mark.run(order=11)
+def test_11_rag_endpoints(client):
+    """Test 11: Test the RAG endpoints for legal and case bots."""
+    print("--- Test 11: Testing RAG Endpoints ---")
+
+    # We'll use the admin user for RAG queries
+    admin_token = get_token(client, ADMIN_USER["username"], ADMIN_USER["password"])
+    headers = get_auth_header(admin_token)
+
+    # 11a: Test the /legal bot
+    legal_payload = {
+        "query": "What is the punishment for theft under BNS?",
+        "model_provider": "gemini",  # Use gemini for testing
+    }
+    response = client.post("/api/v1/rag/legal", headers=headers, json=legal_payload)
+
+    # Handle 503 if RAG service isn't running/configured
+    if response.status_code == 503:
+        print("Warning: RAG service is not available. Skipping RAG tests.")
+        return
+
+    assert response.status_code == 200
+    json_res = response.json()
+    assert "answer" in json_res
+    assert "original_query" in json_res
+    assert len(json_res["answer"]) > 10  # Check for a real answer
+
+    # 11b: Test the /cases bot
+    case_payload = {
+        "query": f"Tell me about case {CASE_DATA_1['Case_Number']}",
+        "model_provider": "gemini",
+    }
+    response = client.post("/api/v1/rag/cases", headers=headers, json=case_payload)
+    assert response.status_code == 200
+    json_res = response.json()
+    assert "answer" in json_res
+    assert "retrieved_context" in json_res
+    assert len(json_res["retrieved_context"]) > 0
+
+
+@pytest.mark.run(order=12)
+def test_12_update_case_field(client):
+    """Test 12: Test updating a field in a case (PUT)."""
+    print("--- Test 12: Testing Case Field Update (PUT) ---")
+
+    # Use the IIC user to test RBAC on update
+    iic_token = get_token(client, IIC_USER["username"], IIC_USER["password"])
+    headers = get_auth_header(iic_token)
+
+    assert created_case_id is not None, "Case ID was not created in test 5"
+
+    new_officer_name = f"Updated IO {int(time.time())}"
+    update_payload = {
+        "field_name": "Investigating_Officer",
+        "field_value": new_officer_name,
+    }
+
+    # 12a: Update the field
+    response = client.put(
+        f"/api/v1/cases/{created_case_id}/field", headers=headers, json=update_payload
+    )
+    assert response.status_code == 200
+    assert response.json()["modified_count"] == 1
+
+    # 12b: Verify the update by fetching the case again
+    response = client.get(f"/api/v1/cases/{created_case_id}", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["Investigating_Officer"] == new_officer_name
+    print(f"Successfully updated case {created_case_id}.")
+
+
+@pytest.mark.run(order=13)
+def test_13_pqc_status_endpoint(client):
+    """Test 13: Test the PQC status endpoint."""
+    print("--- Test 13: Testing PQC Status Endpoint ---")
+
+    # This endpoint does not require auth
+    response = client.get("/api/v1/pqc/status")
+    assert response.status_code == 200
+    json_res = response.json()
+    assert "system_status" in json_res
+    assert "key_management" in json_res
+    assert "registered_agents_count" in json_res["key_management"]
+    assert json_res["key_management"]["registered_agents_count"] >= 1
+
+
+@pytest.mark.run(order=14)
+def test_14_delete_case(client):
+    """Test 14: Test deleting a case (DELETE) with RBAC."""
+    print("--- Test 14: Testing Case Deletion (DELETE) ---")
+
+    # 1. Get the Cuttack case ID (needed for RBAC test)
+    admin_token = get_token(client, ADMIN_USER["username"], ADMIN_USER["password"])
+    admin_headers = get_auth_header(admin_token)
+    search_resp = client.get(
+        "/api/v1/cases/search?district=CUTTACK", headers=admin_headers
+    )
+    cuttack_case = next(
+        r for r in search_resp.json() if r["Case_Number"].startswith("CUT-TEST-")
+    )
+    cuttack_case_id = cuttack_case["_id"]
+
+    # 14a: IIC user (DJ-BALASORE) TRIES to delete CUTTACK case (should fail)
+    iic_token = get_token(client, IIC_USER["username"], IIC_USER["password"])
+    iic_headers = get_auth_header(iic_token)
+
+    response = client.delete(f"/api/v1/cases/{cuttack_case_id}", headers=iic_headers)
+    assert response.status_code == 403  # Forbidden
+    print("Successfully blocked IIC from deleting case out of jurisdiction.")
+
+    # 14b: SP user (BALASORE) successfully DELETES their own case
+    assert created_case_id is not None, "Balasore Case ID not found"
+
+    sp_token = get_token(client, SP_USER["username"], SP_USER["password"])
+    sp_headers = get_auth_header(sp_token)
+
+    response = client.delete(f"/api/v1/cases/{created_case_id}", headers=sp_headers)
+    assert response.status_code == 200
+    assert response.json()["deleted_count"] == 1
+    print(f"Successfully deleted case {created_case_id}.")
+
+    # 14c: Verify the case is gone
+    response = client.get(f"/api/v1/cases/{created_case_id}", headers=sp_headers)
+    assert response.status_code == 404  # Not Found
+    print("Verified case is no longer accessible.")
