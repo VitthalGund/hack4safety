@@ -8,6 +8,7 @@ from app.db.session import get_pg_session
 from app.api.v1.auth import get_current_user
 from app.models.user_schema import User, Alert
 from pydantic import BaseModel
+from typing import Optional
 from datetime import datetime
 
 router = APIRouter()
