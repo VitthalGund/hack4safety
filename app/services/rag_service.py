@@ -1,7 +1,7 @@
 import logging
 from fastapi import HTTPException
 from langchain_mongodb import MongoDBAtlasVectorSearch
-from langchain_community.llms import Ollama
+from langchain_ollama import OllamaLLM
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough
@@ -58,7 +58,7 @@ class RAGService:
 
             # 4. Initialize LLM Clients (Plug-and-Play)
             self.llms = {
-                "phi-3": Ollama(base_url=OLLAMA_BASE_URL, model=PHI3_MODEL),
+                "phi-3": OllamaLLM(base_url=OLLAMA_BASE_URL, model=PHI3_MODEL),
                 "gemini": ChatGoogleGenerativeAI(
                     model=GEMINI_MODEL, google_api_key=settings.GOOGLE_GEMINI_API_KEY
                 ),
