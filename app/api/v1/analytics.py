@@ -1,6 +1,7 @@
 import logging
 import copy
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException
+
 from pymongo.database import Database
 from typing import List, Dict, Any, Literal, Optional  # Import Optional
 
@@ -50,7 +51,6 @@ CONVICTION_PIPELINE_STAGES = [
         # 4. Sort by the highest conviction rate
         "$sort": {"conviction_rate": -1}
     },
-    {"$limit": 50},  # Limit to top 50 results
 ]
 
 # --- Endpoints ---

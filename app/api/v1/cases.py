@@ -6,6 +6,7 @@ from pymongo.database import Database
 from typing import Dict, Any, List, Optional
 from bson import ObjectId
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.services.rag_service import rag_service
 from sqlalchemy import select, or_
 
 from app.db.session import get_mongo_db, get_pg_session
@@ -18,6 +19,7 @@ from app.models.user_schema import (
     Alert,
 )  # Added UserRole, Agent, Alert
 from app.core.embedding import embeddings_client
+from app.core.config import settings
 
 router = APIRouter()
 log = logging.getLogger(__name__)
@@ -313,6 +315,49 @@ async def search_cases(
     return results
 
 
+async def _generate_case_summary(case_data: dict) -> str:
+    """
+    Generates a brief summary for a case document.
+    Uses the RAG service if available, otherwise falls back to a simple string.
+    """
+    if not rag_service:
+        log.warning(
+            f"RAG service not available, generating simple summary for {case_data.get('Case_Number')}."
+        )
+
+    # Try to use RAG service to summarize
+    try:
+        prompt = f"""
+        Summarize the following case in 2-3 brief bullet points for a police dashboard.
+        Include Accused, Sections, and the final Result.
+        
+        Case Number: {case_data.get('Case_Number', 'N/A')}
+        Accused: {case_data.get('Accused_Name', 'N/A')}
+        Sections: {case_data.get('Sections_of_Law', 'N/A')}
+        Investigating Officer: {case_data.get('Investigating_Officer', 'N/A')}
+        Result: {case_data.get('Result', 'N/A')}
+        """
+
+        # Use the default model provider from settings
+        default_provider = settings.DEFAULT_LLM_PROVIDER
+
+        response = await rag_service.ask_generic(prompt, default_provider)
+        # Assuming response is {'response': '... summary ...'}
+        return response.get("response", "Summary generation failed.")
+
+    except Exception as e:
+        log.error(f"AI summary generation failed: {e}. Falling back to basic summary.")
+
+    # Fallback summary (mimics old frontend mock)
+    return f"""
+    <p>This case (<strong>{case_data.get('Case_Number', 'N/A')}</strong>) involves <strong>{case_data.get('Accused_Name', 'N/A')}</strong> regarding <strong>{case_data.get('Sections_of_Law', 'N/A')}</strong>.</p>
+    <ul class="list-disc pl-5 mt-2">
+      <li><strong>Judgement:</strong> The final judgement was <strong>{case_data.get('Result', 'N/A')}</strong>.</li>
+      <li><strong>Investigating Officer:</strong> {case_data.get('Investigating_Officer', 'N/A')}</li>
+    </ul>
+    """
+
+
 @router.get("/{case_mongo_id}", summary="Get a single full case by its MongoDB ID")
 async def get_full_case(
     case_mongo_id: str,
@@ -320,18 +365,20 @@ async def get_full_case(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Retrieves the full details for a single case.
+    Retrieves the full details for a single case, including an AI-generated summary.
     Access is restricted based on the user's role.
     """
     try:
         obj_id = ObjectId(case_mongo_id)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid MongoDB ID format")
+
     collection = db["conviction_cases"]
     case = collection.find_one({"_id": obj_id})
     if case is None:
         raise HTTPException(status_code=404, detail="Case not found")
-    # Role-based access check
+
+    # ... (Role-based access check - UNCHANGED) ...
     if current_user.role == UserRole.SP:
         if case.get("District") != current_user.district:
             raise HTTPException(
@@ -344,7 +391,15 @@ async def get_full_case(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied: Case is not in your police station.",
             )
+
+    # --- FIX: Generate and add summary ---
+    case["Summary"] = await _generate_case_summary(case)
+
     case["_id"] = str(case["_id"])
+
+    # Exclude embedding from the response
+    case.pop("case_embedding", None)
+
     return case
 
 
