@@ -218,6 +218,8 @@ async def get_performance_ranking(
     group_by: Literal["Investigating_Officer", "Police_Station"] = Query(
         "Investigating_Officer", description="Rank by officer or police station"
     ),
+    skip: int = Query(0, ge=0, description="Number of records to skip"),
+    limit: int = Query(5, ge=1, le=50, description="Number of records to return"),
 ):
     """
     Calculates conviction rates grouped by Investigating Officer or Police Station
@@ -242,6 +244,10 @@ async def get_performance_ranking(
 
     # --- 3. FIX: Un-comment this line. It's now safe and correct. ---
     pipeline[2]["$project"].pop("category")
+
+    pipeline.append({"$skip": skip})
+    pipeline.append({"$limit": limit})
+
     try:
         results = list(db["conviction_cases"].aggregate(pipeline))
         return results
