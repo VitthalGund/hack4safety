@@ -1,4 +1,5 @@
-from pymongo import MongoClient
+from pymongo import MongoClient, TEXT, ASCENDING, DESCENDING
+from pymongo.database import Database
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from app.core.config import settings
@@ -15,6 +16,96 @@ class DBConnections:
 db = DBConnections()
 
 
+def create_indexes(db_instance: Database):
+    """
+    Creates necessary indexes on the conviction_cases collection
+    to optimize query performance.
+    """
+    try:
+        logging.info("Attempting to create database indexes...")
+        cases = db_instance["conviction_cases"]
+
+        # --- Text Index for General Search ---
+        cases.create_index(
+            [
+                ("Case_Number", TEXT),
+                ("Accused_Name", TEXT),
+                ("Sections_at_Final", TEXT),
+                ("FIR_Contents", TEXT),
+            ],
+            name="text_search_index",
+        )
+
+        # --- Indexes for Analytics & Filtering ---
+        # For rate calculations and rankings
+        cases.create_index(
+            [
+                ("Result", ASCENDING),
+                ("District", ASCENDING),
+            ],
+            name="idx_rate_district",
+        )
+        cases.create_index(
+            [
+                ("Result", ASCENDING),
+                ("Court_Name", ASCENDING),
+            ],
+            name="idx_rate_court",
+        )
+        cases.create_index(
+            [
+                ("Result", ASCENDING),
+                ("Crime_Type", ASCENDING),
+            ],
+            name="idx_rate_crime_type",
+        )
+        cases.create_index(
+            [
+                ("Result", ASCENDING),
+                ("Investigating_Officer", ASCENDING),
+            ],
+            name="idx_rank_io",
+        )
+        cases.create_index(
+            [
+                ("Result", ASCENDING),
+                ("Police_Station", ASCENDING),
+            ],
+            name="idx_rank_ps",
+        )
+        cases.create_index(
+            [
+                ("Result", ASCENDING),
+                ("Term_Unit", ASCENDING),
+            ],
+            name="idx_rank_unit",
+        )
+
+        # For case duration and trend analysis
+        cases.create_index(
+            [("Date_of_Judgement", DESCENDING)], name="idx_trends_judgement_date"
+        )
+        cases.create_index(
+            ["Date_of_Registration", "Date_of_Chargesheet", "Date_of_Judgement"],
+            name="idx_duration_kpi",
+        )
+
+        # --- Index for Case List Pagination ---
+        cases.create_index(
+            [("Date_of_Registration", DESCENDING)], name="idx_case_list_sort"
+        )
+
+        # Index for personnel scorecard
+        cases.create_index(
+            [("Investigating_Officer", ASCENDING), ("Date_of_Judgement", DESCENDING)],
+            name="idx_personnel_scorecard",
+        )
+
+        logging.info("Database indexes created successfully.")
+    except Exception as e:
+        logging.error(f"Failed to create indexes: {e}")
+
+
 def connect_to_mongo():
     """Establishes connection to MongoDB."""
     logging.info("Connecting to MongoDB...")
@@ -24,6 +115,10 @@ def connect_to_mongo():
         # Ping the server to confirm connection
         db.mongo_client.server_info()
         logging.info("Successfully connected to MongoDB.")
+
+        # --- ADDED: Call index creation after connection ---
+        create_indexes(db.mongo_db)
+
     except Exception as e:
         logging.error(f"Failed to connect to MongoDB: {e}")
         raise
@@ -45,7 +140,8 @@ def connect_to_postgres():
             settings.POSTGRES_URL,
             pool_pre_ping=True,
             echo=False,
-            connect_args={"ssl": "require"},
+            # Removed "ssl": "require" as it can cause issues
+            # connect_args={"ssl": "require"},
         )
         db.pg_session_local = sessionmaker(
             bind=db.pg_engine,

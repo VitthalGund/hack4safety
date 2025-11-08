@@ -16,14 +16,16 @@ log = logging.getLogger(__name__)
 CONVICTION_PIPELINE_STAGES = [
     {
         # 1. Filter for only cases that have a final result
-        "$match": {"Result": {"$in": ["Conviction", "Acquitted"]}}
+        # --- FIX: Changed "Conviction" to "Convicted" ---
+        "$match": {"Result": {"$in": ["Convicted", "Acquitted"]}}
     },
     {
         # 2. Group by a placeholder field (to be replaced)
         "$group": {
             "_id": "$GROUP_BY_FIELD_PLACEHOLDER",
             "total_convictions": {
-                "$sum": {"$cond": [{"$eq": ["$Result", "Conviction"]}, 1, 0]}
+                # --- FIX: Changed "Conviction" to "Convicted" ---
+                "$sum": {"$cond": [{"$eq": ["$Result", "Convicted"]}, 1, 0]}
             },
             "total_acquittals": {
                 "$sum": {"$cond": [{"$eq": ["$Result", "Acquitted"]}, 1, 0]}
@@ -31,6 +33,8 @@ CONVICTION_PIPELINE_STAGES = [
             "total_cases": {"$sum": 1},
         }
     },
+    # --- FIX: Add stage to filter out null/empty groupings (fixes unit_name bug) ---
+    {"$match": {"_id": {"$ne": None, "$ne": "", "$ne": "N/A"}}},
     {
         # 3. Calculate the rate
         "$project": {
@@ -45,10 +49,18 @@ CONVICTION_PIPELINE_STAGES = [
                     {"$divide": ["$total_convictions", "$total_cases"]},
                 ]
             },
+            # --- FEATURE: Added acquittal_rate calculation ---
+            "acquittal_rate": {
+                "$cond": [
+                    {"$eq": ["$total_cases", 0]},
+                    0,  # Avoid division by zero
+                    {"$divide": ["$total_acquittals", "$total_cases"]},
+                ]
+            },
         }
     },
     {
-        # 4. Sort by the highest conviction rate
+        # 4. Sort (placeholder, will be replaced by endpoint)
         "$sort": {"conviction_rate": -1}
     },
     {"$limit": 50},  # Limit to top 50 results
@@ -67,24 +79,59 @@ async def get_conviction_rate(
 ):
     """
     Calculates the conviction rate (convictions / (convictions + acquittals))
-    grouped by a specified category.
+    grouped by a specified category, sorted highest to lowest.
     """
 
-    # --- 2. FIX: Use deepcopy to prevent mutating the global constant ---
     pipeline = copy.deepcopy(CONVICTION_PIPELINE_STAGES)
 
     # Dynamically set the group-by field
     pipeline[1]["$group"]["_id"] = f"${group_by}"
 
     # Rename the projected "category" field for clarity
-    pipeline[2]["$project"][group_by] = "$_id"
-    pipeline[2]["$project"].pop("category")  # This is now safe
+    pipeline[3]["$project"][group_by] = "$_id"
+    pipeline[3]["$project"].pop("category")  # This is now safe
+
+    # Set sort direction
+    pipeline[4]["$sort"] = {"conviction_rate": -1}
 
     try:
         results = list(db["conviction_cases"].aggregate(pipeline))
         return results
     except Exception as e:
-        log.error(f"Analytics aggregation failed: {e}")
+        log.error(f"Conviction rate aggregation failed: {e}")
+        return []
+
+
+# --- FEATURE: New Acquittal Rate Endpoint ---
+@router.get("/acquittal-rate", summary="Get acquittal rate by category")
+async def get_acquittal_rate(
+    db: Database = Depends(get_mongo_db),
+    current_user: User = Depends(get_current_user),
+    group_by: Literal[
+        "District", "Court_Name", "Crime_Type", "Sections_of_Law"
+    ] = Query("District", description="Category to group by"),
+):
+    """
+    Calculates the acquittal rate (acquittals / (convictions + acquittals))
+    grouped by a specified category, sorted highest to lowest.
+    """
+    pipeline = copy.deepcopy(CONVICTION_PIPELINE_STAGES)
+
+    # Dynamically set the group-by field
+    pipeline[1]["$group"]["_id"] = f"${group_by}"
+
+    # Rename the projected "category" field for clarity
+    pipeline[3]["$project"][group_by] = "$_id"
+    pipeline[3]["$project"].pop("category")
+
+    # Set sort direction
+    pipeline[4]["$sort"] = {"acquittal_rate": -1}  # Sort by acquittal rate
+
+    try:
+        results = list(db["conviction_cases"].aggregate(pipeline))
+        return results
+    except Exception as e:
+        log.error(f"Acquittal rate aggregation failed: {e}")
         return []
 
 
@@ -103,7 +150,6 @@ async def get_avg_durations(
             "date_reg": {"$toDate": "$Date_of_Registration"},
             "date_cs": {"$toDate": "$Date_of_Chargesheet"},
             "date_judge": {"$toDate": "$Date_of_Judgement"},
-            # Pass through fields needed for duration calc
             "Investigating_Officer": 1,
         }
     }
@@ -149,6 +195,9 @@ async def get_case_trends(
     db: Database = Depends(get_mongo_db),
     current_user: User = Depends(get_current_user),
     crime_type: Optional[str] = Query(None, description="Filter trends by Crime_Type"),
+    # --- FEATURE: Added Year and Month filters ---
+    year: Optional[int] = Query(None, description="Filter by judgement year"),
+    month: Optional[int] = Query(None, description="Filter by judgement month"),
 ):
     """
     Provides time-series data for case outcomes (convictions vs. acquittals)
@@ -156,12 +205,36 @@ async def get_case_trends(
     """
 
     match_stage = {
-        "Result": {"$in": ["Conviction", "Acquitted"]},
+        # --- FIX: Changed "Conviction" to "Convicted" ---
+        "Result": {"$in": ["Convicted", "Acquitted"]},
         "judgement_date": {"$ne": None},
     }
 
     if crime_type:
         match_stage["Crime_Type"] = crime_type
+
+    # --- FEATURE: Add year/month to match logic ---
+    if year:
+        # Add year to match_stage, ensuring $expr exists if month is also added
+        if "$expr" not in match_stage:
+            match_stage["$expr"] = {}
+        match_stage["$expr"]["$eq"] = [{"$year": "$judgement_date"}, year]
+
+    if month:
+        # Add month to match_stage, ensuring $expr exists
+        if "$expr" not in match_stage:
+            match_stage["$expr"] = {}
+
+        # If year was also specified, we need to $and them
+        if "$eq" in match_stage["$expr"]:
+            match_stage["$expr"] = {
+                "$and": [
+                    {"$eq": [{"$year": "$judgement_date"}, year]},
+                    {"$eq": [{"$month": "$judgement_date"}, month]},
+                ]
+            }
+        else:
+            match_stage["$expr"]["$eq"] = [{"$month": "$judgement_date"}, month]
 
     pipeline = [
         {"$addFields": {"judgement_date": {"$toDate": "$Date_of_Judgement"}}},
@@ -173,7 +246,8 @@ async def get_case_trends(
                     "month": {"$month": "$judgement_date"},
                 },
                 "total_convictions": {
-                    "$sum": {"$cond": [{"$eq": ["$Result", "Conviction"]}, 1, 0]}
+                    # --- FIX: Changed "Conviction" to "Convicted" ---
+                    "$sum": {"$cond": [{"$eq": ["$Result", "Convicted"]}, 1, 0]}
                 },
                 "total_acquittals": {
                     "$sum": {"$cond": [{"$eq": ["$Result", "Acquitted"]}, 1, 0]}
@@ -207,8 +281,8 @@ async def get_case_trends(
 async def get_performance_ranking(
     db: Database = Depends(get_mongo_db),
     current_user: User = Depends(get_current_user),
-    group_by: Literal["Investigating_Officer", "Police_Station"] = Query(
-        "Investigating_Officer", description="Rank by officer or police station"
+    group_by: Literal["Investigating_Officer", "Police_Station", "Term_Unit"] = Query(
+        "Investigating_Officer", description="Rank by officer, police station, or unit"
     ),
     skip: int = Query(0, ge=0, description="Number of records to skip"),
     limit: int = Query(5, ge=1, le=50, description="Number of records to return"),
@@ -218,8 +292,10 @@ async def get_performance_ranking(
     to create a performance leaderboard.
     """
 
-    # --- 2. FIX: Use deepcopy to prevent mutating the global constant ---
     pipeline = copy.deepcopy(CONVICTION_PIPELINE_STAGES)
+
+    # Set sort direction
+    pipeline[4]["$sort"] = {"conviction_rate": -1}
 
     if group_by == "Investigating_Officer":
         pipeline[1]["$group"]["_id"] = {
@@ -227,16 +303,19 @@ async def get_performance_ranking(
             "rank": "$Rank",
         }
         # Project them into the final output
-        pipeline[2]["$project"]["officer_name"] = "$_id.name"
-        pipeline[2]["$project"]["rank"] = "$_id.rank"
+        pipeline[3]["$project"]["officer_name"] = "$_id.name"
+        pipeline[3]["$project"]["rank"] = "$_id.rank"
+
+    elif group_by == "Term_Unit":
+        pipeline[1]["$group"]["_id"] = "$Term_Unit"
+        pipeline[3]["$project"]["unit_name"] = "$_id"
+
     else:
         # Group by Police Station
         pipeline[1]["$group"]["_id"] = "$Police_Station"
-        pipeline[2]["$project"]["police_station"] = "$_id"
+        pipeline[3]["$project"]["police_station"] = "$_id"
 
-    # --- 3. FIX: Un-comment this line. It's now safe and correct. ---
-    pipeline[2]["$project"].pop("category")
-
+    pipeline[3]["$project"].pop("category")
     pipeline.append({"$skip": skip})
     pipeline.append({"$limit": limit})
 
@@ -261,10 +340,8 @@ async def get_personnel_scorecard(
     Provides a detailed performance breakdown for a single Investigating Officer.
     """
 
-    # --- Pipeline to get conviction stats ---
     match_stage = {"$match": {"Investigating_Officer": personnel_name}}
 
-    # --- Pipeline to get durations ---
     date_conversion_stage = {
         "$project": {
             "Result": 1,
@@ -288,14 +365,14 @@ async def get_personnel_scorecard(
         }
     }
 
-    # --- Grouping and Projection ---
     group_stage = {
         "$group": {
             "_id": "$Investigating_Officer",
             "rank": {"$first": "$Rank"},
             "total_cases": {"$sum": 1},
             "total_convictions": {
-                "$sum": {"$cond": [{"$eq": ["$Result", "Conviction"]}, 1, 0]}
+                # --- FIX: Changed "Conviction" to "Convicted" ---
+                "$sum": {"$cond": [{"$eq": ["$Result", "Convicted"]}, 1, 0]}
             },
             "total_acquittals": {
                 "$sum": {"$cond": [{"$eq": ["$Result", "Acquitted"]}, 1, 0]}
@@ -373,7 +450,8 @@ async def get_personnel_scorecard(
 
     except Exception as e:
         log.error(f"Personnel scorecard aggregation failed: {e}")
-        return {"error": str(e)}
+        # Return 500 instead of 200 with error
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get(
@@ -390,7 +468,8 @@ async def get_chargesheet_comparison(
     pipeline = [
         {
             "$match": {
-                "Result": {"$in": ["Conviction", "Acquitted"]},
+                # --- FIX: Changed "Conviction" to "Convicted" ---
+                "Result": {"$in": ["Convicted", "Acquitted"]},
                 "Date_of_Chargesheet": {"$ne": None, "$exists": True},
             }
         },
@@ -414,7 +493,8 @@ async def get_chargesheet_comparison(
             "$group": {
                 "_id": "$Chargesheeted_Y_N",
                 "total_convictions": {
-                    "$sum": {"$cond": [{"$eq": ["$Result", "Conviction"]}, 1, 0]}
+                    # --- FIX: Changed "Conviction" to "Convicted" ---
+                    "$sum": {"$cond": [{"$eq": ["$Result", "Convicted"]}, 1, 0]}
                 },
                 "total_acquittals": {
                     "$sum": {"$cond": [{"$eq": ["$Result", "Acquitted"]}, 1, 0]}
