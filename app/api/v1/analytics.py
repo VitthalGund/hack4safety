@@ -1,6 +1,6 @@
 import logging
 import copy
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException
 from pymongo.database import Database
 from typing import List, Dict, Any, Literal
 
@@ -363,3 +363,87 @@ async def get_personnel_scorecard(
     except Exception as e:
         log.error(f"Personnel scorecard aggregation failed: {e}")
         return {"error": str(e)}
+
+
+@router.get("/chargesheet-comparison", summary="Get data for Sankey diagram")
+async def get_chargesheet_comparison(
+    db: Database = Depends(get_mongo_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Provides data formatted for a Sankey diagram, showing the flow from
+    'Sections_of_Law' to the final 'Result'.
+    """
+
+    links_pipeline = [
+        {
+            # 1. Filter for only cases that have a final result
+            "$match": {"Result": {"$in": ["Conviction", "Acquitted"]}}
+        },
+        {
+            # 2. Split the 'Sections_of_Law' string by comma and space
+            # This handles "IPC 302, IPC 379" -> ["IPC 302", "IPC 379"]
+            "$project": {
+                "Result": 1,
+                "sections_array": {"$split": ["$Sections_of_Law", ", "]},
+            }
+        },
+        {
+            # 3. Create a separate document for each section in the array
+            "$unwind": "$sections_array"
+        },
+        {
+            # 4. Clean up any extra whitespace
+            "$project": {
+                "Result": 1,
+                "section": {"$trim": {"input": "$sections_array"}},
+            }
+        },
+        {
+            # 5. Group by the section and the result to get the count
+            "$group": {
+                "_id": {"source": "$section", "target": "$Result"},
+                "value": {"$sum": 1},
+            }
+        },
+        {
+            # 6. Format as source/target/value for Sankey links
+            "$project": {
+                "_id": 0,
+                "source": "$_id.source",
+                "target": "$_id.target",
+                "value": "$value",
+            }
+        },
+        {
+            # 7. Sort by value for clarity
+            "$sort": {"value": -1}
+        },
+        {
+            # 8. Limit to a reasonable number for visualization
+            "$limit": 100
+        },
+    ]
+
+    try:
+        # --- Create Links ---
+        links = list(db["conviction_cases"].aggregate(links_pipeline))
+
+        if not links:
+            return {"nodes": [], "links": []}
+
+        # --- Generate Nodes ---
+        # Get all unique source and target names from the links
+        node_names = set()
+        for link in links:
+            node_names.add(link["source"])
+            node_names.add(link["target"])
+
+        # Format as a list of objects
+        nodes = [{"id": name} for name in node_names]
+
+        return {"nodes": nodes, "links": links}
+
+    except Exception as e:
+        log.error(f"Chargesheet comparison aggregation failed: {e}")
+        return {"nodes": [], "links": []}
