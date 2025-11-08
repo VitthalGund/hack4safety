@@ -1,13 +1,15 @@
 import logging
 from fastapi import HTTPException
-from langchain_mongodb import MongoDBAtlasVectorSearch
+from qdrant_client import QdrantClient  # <-- ADDED
+from langchain_qdrant import Qdrant  # <-- ADDED
 from langchain_ollama import OllamaLLM
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from googletrans import Translator, LANGUAGES
-import pymongo
+
+# import pymongo  # <-- REMOVED
 
 from app.core.config import settings
 from app.core.embedding import embeddings_client  # Import our shared embedder
@@ -29,29 +31,29 @@ GEMINI_MODEL = "gemini-2.0-flash"
 class RAGService:
     def __init__(self):
         try:
-            # 1. Initialize DB Connection
-            client = pymongo.MongoClient(settings.MONGO_URL)
-            db = client[DB_NAME]
+            # 1. Initialize Qdrant Connection
+            log.info(f"Connecting to Qdrant at {settings.QDRANT_URL}...")
+            client = QdrantClient(
+                url=settings.QDRANT_URL, api_key=settings.QDRANT_API_KEY
+            )
 
             if not embeddings_client:
                 raise RuntimeError("Embedding client failed to load.")
 
             # 2. Initialize Legal Vector Store Retriever
-            legal_collection = db[LEGAL_COLLECTION_NAME]
-            self.legal_retriever = MongoDBAtlasVectorSearch(
-                collection=legal_collection,
-                embedding=embeddings_client,
-                index_name=LEGAL_INDEX_NAME,
+            self.legal_retriever = Qdrant(
+                client=client,
+                collection_name=LEGAL_COLLECTION_NAME,
+                embeddings=embeddings_client,
             ).as_retriever(
                 search_kwargs={"k": 5}
             )  # Get top 5 legal chunks
 
             # 3. Initialize Case Vector Store Retriever
-            case_collection = db[CASE_COLLECTION_NAME]
-            self.case_retriever = MongoDBAtlasVectorSearch(
-                collection=case_collection,
-                embedding=embeddings_client,
-                index_name=CASE_INDEX_NAME,
+            self.case_retriever = Qdrant(
+                client=client,
+                collection_name=CASE_COLLECTION_NAME,
+                embeddings=embeddings_client,
             ).as_retriever(
                 search_kwargs={"k": 5}
             )  # Get top 5 case files
@@ -66,7 +68,7 @@ class RAGService:
 
             # 5. Initialize Translator
             self.translator = Translator()
-            log.info("RAGService initialized successfully.")
+            log.info("RAGService initialized successfully with Qdrant.")
 
         except Exception as e:
             log.error(f"Failed to initialize RAGService: {e}")
@@ -136,17 +138,23 @@ class RAGService:
 
         log.info(f"Invoking RAG chain with model: {model_provider}...")
 
+        # Note: retriever.ainvoke is used here, which is supported by Qdrant retriever
         retrieved_docs = await retriever.ainvoke(search_query)
         context = format_docs(retrieved_docs)
 
+        # Re-create the prompt string for LLM invocation
         final_prompt_str = prompt.format(
             context=context, question=query, language=original_lang_name
         )
 
+        # Use ainovke for the LLM call
         answer = await llm.ainvoke(final_prompt_str)
 
+        # Check if answer is a string or an object with 'content'
+        final_answer = answer.content if hasattr(answer, "content") else str(answer)
+
         return {
-            "answer": answer.content,
+            "answer": final_answer,
             "original_query": query,
             "model_used": model_provider,
             "original_language": original_lang_name,
