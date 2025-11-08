@@ -11,6 +11,8 @@ from app.models.user_schema import User
 router = APIRouter()
 log = logging.getLogger(__name__)
 
+# ... (CONVICTION_PIPELINE_STAGES, get_conviction_rate, get_avg_durations, get_case_trends...
+# ... all remain unchanged from your existing file) ...
 # --- Re-usable constants ---
 CONVICTION_PIPELINE_STAGES = [
     {
@@ -81,7 +83,6 @@ async def get_conviction_rate(
 
     try:
         results = list(db["conviction_cases"].aggregate(pipeline))
-        print(results)
         return results
     except Exception as e:
         log.error(f"Analytics aggregation failed: {e}")
@@ -103,6 +104,8 @@ async def get_avg_durations(
             "date_reg": {"$toDate": "$Date_of_Registration"},
             "date_cs": {"$toDate": "$Date_of_Chargesheet"},
             "date_judge": {"$toDate": "$Date_of_Judgement"},
+            # Pass through fields needed for duration calc
+            "Investigating_Officer": 1,
         }
     }
     duration_calc_stage = {
@@ -110,6 +113,7 @@ async def get_avg_durations(
             "investigation_duration_ms": {"$subtract": ["$date_cs", "$date_reg"]},
             "trial_duration_ms": {"$subtract": ["$date_judge", "$date_cs"]},
             "total_lifecycle_ms": {"$subtract": ["$date_judge", "$date_reg"]},
+            "Investigating_Officer": 1,
         }
     }
     average_stage = {
@@ -133,9 +137,8 @@ async def get_avg_durations(
             return {"error": "No data to calculate."}
         final_result = result[0]
         for key in final_result:
-            if key != "_id" and final_result[key]:
+            if key != "_id" and final_result.get(key) is not None:
                 final_result[key] = round(final_result[key], 1)
-        print(final_result)
         return final_result
     except Exception as e:
         log.error(f"Duration KPI aggregation failed: {e}")
@@ -187,7 +190,6 @@ async def get_case_trends(
     ]
     try:
         results = list(db["conviction_cases"].aggregate(pipeline))
-        print(results)
         return results
     except Exception as e:
         log.error(f"Trends aggregation failed: {e}")
@@ -213,7 +215,6 @@ async def get_performance_ranking(
     pipeline = copy.deepcopy(CONVICTION_PIPELINE_STAGES)
 
     if group_by == "Investigating_Officer":
-        # Group by both officer name and rank
         pipeline[1]["$group"]["_id"] = {
             "name": "$Investigating_Officer",
             "rank": "$Rank",
@@ -228,11 +229,137 @@ async def get_performance_ranking(
 
     # --- 3. FIX: Un-comment this line. It's now safe and correct. ---
     pipeline[2]["$project"].pop("category")
-
     try:
         results = list(db["conviction_cases"].aggregate(pipeline))
-        print(results)
         return results
     except Exception as e:
         log.error(f"Performance ranking aggregation failed: {e}")
         return []
+
+
+@router.get(
+    "/performance/personnel/{personnel_name}",
+    summary="Get a detailed scorecard for an officer",
+)
+async def get_personnel_scorecard(
+    personnel_name: str,
+    db: Database = Depends(get_mongo_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Provides a detailed performance breakdown for a single Investigating Officer.
+    """
+
+    # --- Pipeline to get conviction stats ---
+    match_stage = {"$match": {"Investigating_Officer": personnel_name}}
+
+    # --- Pipeline to get durations ---
+    date_conversion_stage = {
+        "$project": {
+            "Result": 1,
+            "Delay_Reason": 1,
+            "Rank": 1,
+            "date_reg": {"$toDate": "$Date_of_Registration"},
+            "date_cs": {"$toDate": "$Date_of_Chargesheet"},
+        }
+    }
+    duration_calc_stage = {
+        "$project": {
+            "Result": 1,
+            "Delay_Reason": 1,
+            "Rank": 1,
+            "investigation_duration_days": {
+                "$divide": [
+                    {"$subtract": ["$date_cs", "$date_reg"]},
+                    1000 * 60 * 60 * 24,
+                ]
+            },
+        }
+    }
+
+    # --- Grouping and Projection ---
+    group_stage = {
+        "$group": {
+            "_id": "$Investigating_Officer",
+            "rank": {"$first": "$Rank"},
+            "total_cases": {"$sum": 1},
+            "total_convictions": {
+                "$sum": {"$cond": [{"$eq": ["$Result", "Conviction"]}, 1, 0]}
+            },
+            "total_acquittals": {
+                "$sum": {"$cond": [{"$eq": ["$Result", "Acquitted"]}, 1, 0]}
+            },
+            "avg_investigation_duration_days": {"$avg": "$investigation_duration_days"},
+            "acquittal_reasons": {
+                "$push": {
+                    "$cond": [
+                        {"$eq": ["$Result", "Acquitted"]},
+                        "$Delay_Reason",
+                        "$$REMOVE",  # Don't add nulls
+                    ]
+                }
+            },
+        }
+    }
+
+    final_project_stage = {
+        "$project": {
+            "_id": 0,
+            "officer_name": "$_id",
+            "rank": 1,
+            "total_cases": 1,
+            "total_convictions": 1,
+            "total_acquittals": 1,
+            "conviction_rate": {
+                "$cond": [
+                    {"$eq": ["$total_cases", 0]},
+                    0,
+                    {"$divide": ["$total_convictions", "$total_cases"]},
+                ]
+            },
+            "avg_investigation_duration_days": {
+                "$round": ["$avg_investigation_duration_days", 1]
+            },
+            "common_acquittal_reasons": "$acquittal_reasons",  # This will be a list
+        }
+    }
+
+    pipeline = [
+        match_stage,
+        date_conversion_stage,
+        duration_calc_stage,
+        group_stage,
+        final_project_stage,
+    ]
+
+    try:
+        result = list(db["conviction_cases"].aggregate(pipeline))
+        if not result:
+            raise HTTPException(
+                status_code=404, detail="Personnel not found or has no cases"
+            )
+
+        # Get recent cases
+        recent_cases = list(
+            db["conviction_cases"]
+            .find(
+                {"Investigating_Officer": personnel_name},
+                {"Case_Number": 1, "Result": 1, "_id": 1},
+            )
+            .sort("Date_of_Judgement", -1)
+            .limit(5)
+        )
+
+        # Convert ObjectId
+        for case in recent_cases:
+            case["id"] = str(case["_id"])
+            case.pop("_id")
+
+        final_report = result[0]
+        final_report["recent_cases"] = recent_cases
+
+        return final_report
+
+    except Exception as e:
+        log.error(f"Personnel scorecard aggregation failed: {e}")
+        return {"error": str(e)}

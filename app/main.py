@@ -1,6 +1,5 @@
 import logging
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.db.session import (
     connect_to_mongo,
@@ -8,11 +7,17 @@ from app.db.session import (
     connect_to_postgres,
     close_postgres_connection,
 )
+
+# Import all routers
 from app.api.v1 import pqc_endpoints
 from app.api.v1 import cases
 from app.api.v1 import auth
 from app.api.v1 import analytics
 from app.api.v1 import insights
+from app.api.v1 import admin
+from app.api.v1 import accused
+from app.api.v1 import geo
+from app.api.v1 import alerts
 from app.api.v1 import metadata
 from app.api.v1 import rag
 
@@ -45,9 +50,6 @@ app = FastAPI(
 )
 
 # --- 2. ADD CORS MIDDLEWARE ---
-# This block will fix the "cross error" (CORS)
-# WARNING: "allow_origins=["*"]" is for development only.
-# For production, you should list your frontend's domain.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Allows all origins
@@ -61,8 +63,14 @@ app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
 app.include_router(cases.router, prefix="/api/v1/cases", tags=["Case Management"])
 app.include_router(analytics.router, prefix="/api/v1/analytics", tags=["Analytics"])
 app.include_router(insights.router, prefix="/api/v1/insights", tags=["AI Insights"])
-app.include_router(metadata.router, prefix="/api/v1/metadata", tags=["Metadata"])
 app.include_router(rag.router, prefix="/api/v1/rag", tags=["RAG Legal Bot"])
+app.include_router(metadata.router, prefix="/api/v1/metadata", tags=["Metadata"])
+
+# --- NEW ROUTERS ---
+app.include_router(admin.router, prefix="/api/v1/admin", tags=["Admin"])
+app.include_router(accused.router, prefix="/api/v1/accused", tags=["Accused 360"])
+app.include_router(geo.router, prefix="/api/v1/geo", tags=["Geospatial"])
+app.include_router(alerts.router, prefix="/api/v1/alerts", tags=["Alerts"])
 
 
 @app.get("/", tags=["Health Check"])

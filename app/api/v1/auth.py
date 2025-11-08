@@ -4,10 +4,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from sqlalchemy.orm import sessionmaker
 from pydantic import BaseModel
 from jose import JWTError, jwt
-from bcrypt import hashpw, gensalt, checkpw, _bcrypt
+from bcrypt import hashpw, gensalt, checkpw
 
 from app.models.user_schema import User, UserRole, Base
 from app.db.session import get_pg_session, db
@@ -114,7 +113,7 @@ async def create_default_admin():
 
 @router.on_event("startup")
 async def on_startup():
-    """Create all tables (User, Agent) on startup."""
+    """Create all tables (User, Agent, Alert) on startup."""
     async with db.pg_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -151,8 +150,7 @@ async def login_for_access_token(
 
 
 async def get_current_user(
-    token: str = Depends(oauth2_scheme),
-    session: AsyncSession = Depends(get_pg_session),
+    token: str = Depends(oauth2_scheme), session: AsyncSession = Depends(get_pg_session)
 ):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
