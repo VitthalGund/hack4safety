@@ -3,7 +3,7 @@ import copy
 from fastapi import APIRouter, Depends, Query, HTTPException
 
 from pymongo.database import Database
-from typing import List, Dict, Any, Literal, Optional  # Import Optional
+from typing import List, Dict, Any, Literal, Optional
 
 from app.db.session import get_mongo_db
 from app.api.v1.auth import get_current_user
@@ -51,6 +51,7 @@ CONVICTION_PIPELINE_STAGES = [
         # 4. Sort by the highest conviction rate
         "$sort": {"conviction_rate": -1}
     },
+    {"$limit": 50},  # Limit to top 50 results
 ]
 
 # --- Endpoints ---
@@ -77,7 +78,7 @@ async def get_conviction_rate(
 
     # Rename the projected "category" field for clarity
     pipeline[2]["$project"][group_by] = "$_id"
-    pipeline[2]["$project"].pop("category", None)
+    pipeline[2]["$project"].pop("category")  # This is now safe
 
     try:
         results = list(db["conviction_cases"].aggregate(pipeline))
@@ -147,60 +148,51 @@ async def get_avg_durations(
 async def get_case_trends(
     db: Database = Depends(get_mongo_db),
     current_user: User = Depends(get_current_user),
-    year: Optional[int] = Query(
-        None, description="Filter by a specific judgement year"
-    ),
+    crime_type: Optional[str] = Query(None, description="Filter trends by Crime_Type"),
 ):
     """
     Provides time-series data for case outcomes (convictions vs. acquittals)
-    grouped by month and year.
+    grouped by month and year, with an optional filter for Crime_Type.
     """
+
+    match_stage = {
+        "Result": {"$in": ["Conviction", "Acquitted"]},
+        "judgement_date": {"$ne": None},
+    }
+
+    if crime_type:
+        match_stage["Crime_Type"] = crime_type
+
     pipeline = [
         {"$addFields": {"judgement_date": {"$toDate": "$Date_of_Judgement"}}},
+        {"$match": match_stage},
         {
-            "$match": {
-                "Result": {"$in": ["Conviction", "Acquitted"]},
-                "judgement_date": {"$ne": None},
+            "$group": {
+                "_id": {
+                    "year": {"$year": "$judgement_date"},
+                    "month": {"$month": "$judgement_date"},
+                },
+                "total_convictions": {
+                    "$sum": {"$cond": [{"$eq": ["$Result", "Conviction"]}, 1, 0]}
+                },
+                "total_acquittals": {
+                    "$sum": {"$cond": [{"$eq": ["$Result", "Acquitted"]}, 1, 0]}
+                },
+                "total_cases": {"$sum": 1},
             }
         },
+        {
+            "$project": {
+                "_id": 0,
+                "year": "$_id.year",
+                "month": "$_id.month",
+                "total_convictions": 1,
+                "total_acquittals": 1,
+                "total_cases": 1,
+            }
+        },
+        {"$sort": {"year": 1, "month": 1}},
     ]
-
-    # --- FIX: Add year filter if provided ---
-    if year:
-        pipeline.append(
-            {"$match": {"$expr": {"$eq": [{"$year": "$judgement_date"}, year]}}}
-        )
-
-    pipeline.extend(
-        [
-            {
-                "$group": {
-                    "_id": {
-                        "year": {"$year": "$judgement_date"},
-                        "month": {"$month": "$judgement_date"},
-                    },
-                    "total_convictions": {
-                        "$sum": {"$cond": [{"$eq": ["$Result", "Conviction"]}, 1, 0]}
-                    },
-                    "total_acquittals": {
-                        "$sum": {"$cond": [{"$eq": ["$Result", "Acquitted"]}, 1, 0]}
-                    },
-                    "total_cases": {"$sum": 1},
-                }
-            },
-            {
-                "$project": {
-                    "_id": 0,
-                    "year": "$_id.year",
-                    "month": "$_id.month",
-                    "total_convictions": 1,
-                    "total_acquittals": 1,
-                    "total_cases": 1,
-                }
-            },
-            {"$sort": {"year": 1, "month": 1}},
-        ]
-    )
     try:
         results = list(db["conviction_cases"].aggregate(pipeline))
         return results
