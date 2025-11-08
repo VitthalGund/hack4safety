@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy import select
 from pydantic import BaseModel
 from jose import JWTError, jwt
