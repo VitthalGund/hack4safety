@@ -1,8 +1,8 @@
 import logging
 import copy
-from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, Query
 from pymongo.database import Database
-from typing import List, Dict, Any, Literal
+from typing import List, Dict, Any, Literal, Optional  # Import Optional
 
 from app.db.session import get_mongo_db
 from app.api.v1.auth import get_current_user
@@ -11,8 +11,6 @@ from app.models.user_schema import User
 router = APIRouter()
 log = logging.getLogger(__name__)
 
-# ... (CONVICTION_PIPELINE_STAGES, get_conviction_rate, get_avg_durations, get_case_trends...
-# ... all remain unchanged from your existing file) ...
 # --- Re-usable constants ---
 CONVICTION_PIPELINE_STAGES = [
     {
@@ -79,7 +77,7 @@ async def get_conviction_rate(
 
     # Rename the projected "category" field for clarity
     pipeline[2]["$project"][group_by] = "$_id"
-    pipeline[2]["$project"].pop("category")  # This is now safe
+    pipeline[2]["$project"].pop("category", None)
 
     try:
         results = list(db["conviction_cases"].aggregate(pipeline))
@@ -137,7 +135,7 @@ async def get_avg_durations(
             return {"error": "No data to calculate."}
         final_result = result[0]
         for key in final_result:
-            if key != "_id" and final_result.get(key) is not None:
+            if key != "_id" and final_result[key]:
                 final_result[key] = round(final_result[key], 1)
         return final_result
     except Exception as e:
@@ -147,7 +145,11 @@ async def get_avg_durations(
 
 @router.get("/trends", summary="Get conviction/acquittal trends over time")
 async def get_case_trends(
-    db: Database = Depends(get_mongo_db), current_user: User = Depends(get_current_user)
+    db: Database = Depends(get_mongo_db),
+    current_user: User = Depends(get_current_user),
+    year: Optional[int] = Query(
+        None, description="Filter by a specific judgement year"
+    ),
 ):
     """
     Provides time-series data for case outcomes (convictions vs. acquittals)
@@ -161,33 +163,44 @@ async def get_case_trends(
                 "judgement_date": {"$ne": None},
             }
         },
-        {
-            "$group": {
-                "_id": {
-                    "year": {"$year": "$judgement_date"},
-                    "month": {"$month": "$judgement_date"},
-                },
-                "total_convictions": {
-                    "$sum": {"$cond": [{"$eq": ["$Result", "Conviction"]}, 1, 0]}
-                },
-                "total_acquittals": {
-                    "$sum": {"$cond": [{"$eq": ["$Result", "Acquitted"]}, 1, 0]}
-                },
-                "total_cases": {"$sum": 1},
-            }
-        },
-        {
-            "$project": {
-                "_id": 0,
-                "year": "$_id.year",
-                "month": "$_id.month",
-                "total_convictions": 1,
-                "total_acquittals": 1,
-                "total_cases": 1,
-            }
-        },
-        {"$sort": {"year": 1, "month": 1}},
     ]
+
+    # --- FIX: Add year filter if provided ---
+    if year:
+        pipeline.append(
+            {"$match": {"$expr": {"$eq": [{"$year": "$judgement_date"}, year]}}}
+        )
+
+    pipeline.extend(
+        [
+            {
+                "$group": {
+                    "_id": {
+                        "year": {"$year": "$judgement_date"},
+                        "month": {"$month": "$judgement_date"},
+                    },
+                    "total_convictions": {
+                        "$sum": {"$cond": [{"$eq": ["$Result", "Conviction"]}, 1, 0]}
+                    },
+                    "total_acquittals": {
+                        "$sum": {"$cond": [{"$eq": ["$Result", "Acquitted"]}, 1, 0]}
+                    },
+                    "total_cases": {"$sum": 1},
+                }
+            },
+            {
+                "$project": {
+                    "_id": 0,
+                    "year": "$_id.year",
+                    "month": "$_id.month",
+                    "total_convictions": 1,
+                    "total_acquittals": 1,
+                    "total_cases": 1,
+                }
+            },
+            {"$sort": {"year": 1, "month": 1}},
+        ]
+    )
     try:
         results = list(db["conviction_cases"].aggregate(pipeline))
         return results
@@ -365,85 +378,72 @@ async def get_personnel_scorecard(
         return {"error": str(e)}
 
 
-@router.get("/chargesheet-comparison", summary="Get data for Sankey diagram")
+@router.get(
+    "/chargesheet-comparison",
+    summary="Compare charge-sheeted vs non-charge-sheeted case outcomes",
+)
 async def get_chargesheet_comparison(
     db: Database = Depends(get_mongo_db),
     current_user: User = Depends(get_current_user),
 ):
     """
-    Provides data formatted for a Sankey diagram, showing the flow from
-    'Sections_of_Law' to the final 'Result'.
+    Compares outcomes for cases that were chargesheeted vs. not.
     """
-
-    links_pipeline = [
+    pipeline = [
         {
-            # 1. Filter for only cases that have a final result
-            "$match": {"Result": {"$in": ["Conviction", "Acquitted"]}}
-        },
-        {
-            # 2. Split the 'Sections_of_Law' string by comma and space
-            # This handles "IPC 302, IPC 379" -> ["IPC 302", "IPC 379"]
-            "$project": {
-                "Result": 1,
-                "sections_array": {"$split": ["$Sections_of_Law", ", "]},
+            "$match": {
+                "Result": {"$in": ["Conviction", "Acquitted"]},
+                "Date_of_Chargesheet": {"$ne": None, "$exists": True},
             }
         },
         {
-            # 3. Create a separate document for each section in the array
-            "$unwind": "$sections_array"
-        },
-        {
-            # 4. Clean up any extra whitespace
-            "$project": {
-                "Result": 1,
-                "section": {"$trim": {"input": "$sections_array"}},
+            "$addFields": {
+                "Chargesheeted_Y_N": {
+                    "$cond": [
+                        {
+                            "$and": [
+                                {"$ne": ["$Date_of_Chargesheet", None]},
+                                {"$ne": ["$Date_of_Chargesheet", ""]},
+                            ]
+                        },
+                        1,
+                        0,
+                    ]
+                }
             }
         },
         {
-            # 5. Group by the section and the result to get the count
             "$group": {
-                "_id": {"source": "$section", "target": "$Result"},
-                "value": {"$sum": 1},
+                "_id": "$Chargesheeted_Y_N",
+                "total_convictions": {
+                    "$sum": {"$cond": [{"$eq": ["$Result", "Conviction"]}, 1, 0]}
+                },
+                "total_acquittals": {
+                    "$sum": {"$cond": [{"$eq": ["$Result", "Acquitted"]}, 1, 0]}
+                },
+                "total_cases": {"$sum": 1},
             }
-        },
-        {
-            # 6. Format as source/target/value for Sankey links
-            "$project": {
-                "_id": 0,
-                "source": "$_id.source",
-                "target": "$_id.target",
-                "value": "$value",
-            }
-        },
-        {
-            # 7. Sort by value for clarity
-            "$sort": {"value": -1}
-        },
-        {
-            # 8. Limit to a reasonable number for visualization
-            "$limit": 100
         },
     ]
-
     try:
-        # --- Create Links ---
-        links = list(db["conviction_cases"].aggregate(links_pipeline))
+        results = list(db["conviction_cases"].aggregate(pipeline))
 
-        if not links:
-            return {"nodes": [], "links": []}
+        # Calculate overall summary
+        total_cases = sum(item.get("total_cases", 0) for item in results)
+        total_convictions = sum(item.get("total_convictions", 0) for item in results)
+        total_acquittals = sum(item.get("total_acquittals", 0) for item in results)
 
-        # --- Generate Nodes ---
-        # Get all unique source and target names from the links
-        node_names = set()
-        for link in links:
-            node_names.add(link["source"])
-            node_names.add(link["target"])
+        summary = {
+            "total_cases": total_cases,
+            "total_convictions": total_convictions,
+            "total_acquittals": total_acquittals,
+            "overall_conviction_rate": (
+                total_convictions / total_cases if total_cases > 0 else 0
+            ),
+        }
 
-        # Format as a list of objects
-        nodes = [{"id": name} for name in node_names]
-
-        return {"nodes": nodes, "links": links}
-
+        # Return both summary and grouped data
+        return {"summary": summary, "by_group": results}
     except Exception as e:
         log.error(f"Chargesheet comparison aggregation failed: {e}")
-        return {"nodes": [], "links": []}
+        return {"summary": {}, "by_group": []}
