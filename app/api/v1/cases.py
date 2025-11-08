@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from pymongo.database import Database
 from typing import Dict, Any, List, Optional
 from bson import ObjectId
+from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.rag_service import rag_service
 from sqlalchemy import select, or_
@@ -315,47 +316,96 @@ async def search_cases(
     return results
 
 
+# --- FIX: New, sophisticated helper function for AI summary ---
 async def _generate_case_summary(case_data: dict) -> str:
     """
-    Generates a brief summary for a case document.
-    Uses the RAG service if available, otherwise falls back to a simple string.
+    Generates an in-depth analytical summary for a case document.
+    Uses the RAG service to identify insights, gaps, and key patterns.
     """
     if not rag_service:
         log.warning(
             f"RAG service not available, generating simple summary for {case_data.get('Case_Number')}."
         )
+        # Fallback to a very basic summary if RAG service fails
+        return f"<p>Case: <strong>{case_data.get('Case_Number')}</strong></p><p>Accused: <strong>{case_data.get('Accused_Name')}</strong></p><p>Result: <strong>{case_data.get('Result')}</strong></p>"
 
-    # Try to use RAG service to summarize
+    # --- 1. Pre-calculate durations ---
+    investigation_duration = "N/A"
+    trial_duration = "N/A"
     try:
-        prompt = f"""
-        Summarize the following case in 2-3 brief bullet points for a police dashboard.
-        Include Accused, Sections, and the final Result.
-        
-        Case Number: {case_data.get('Case_Number', 'N/A')}
-        Accused: {case_data.get('Accused_Name', 'N/A')}
-        Sections: {case_data.get('Sections_of_Law', 'N/A')}
-        Investigating Officer: {case_data.get('Investigating_Officer', 'N/A')}
-        Result: {case_data.get('Result', 'N/A')}
-        """
+        reg_date = datetime.fromisoformat(case_data.get("Date_of_Registration", ""))
+        cs_date = datetime.fromisoformat(case_data.get("Date_of_Chargesheet", ""))
+        judge_date = datetime.fromisoformat(case_data.get("Date_of_Judgement", ""))
 
+        if reg_date and cs_date:
+            investigation_duration = f"{(cs_date - reg_date).days} days"
+        if cs_date and judge_date:
+            trial_duration = f"{(judge_date - cs_date).days} days"
+    except Exception:
+        pass  # Dates may be missing or invalid
+
+    # --- 2. Create a comprehensive data string for the prompt ---
+    # Select key fields for analysis
+    data_string = f"""
+    - Case Number: {case_data.get('Case_Number')}
+    - District/PS: {case_data.get('District')} / {case_data.get('Police_Station')}
+    - Crime Type: {case_data.get('Crime_Type')}
+    - Sections: {case_data.get('Sections_of_Law')}
+    - Investigating Officer (IO): {case_data.get('Investigating_Officer')} ({case_data.get('Rank')})
+    - Accused: {case_data.get('Accused_Name')} (Age: {case_data.get('Age')}, Gender: {case_data.get('Gender')})
+    - Complainant: {case_data.get('Complainant_Informant')}
+    - Result: {case_data.get('Result')}
+    - Sentence: {case_data.get('Sentence_Type', 'N/A')}
+    - Judge/Court: {case_data.get('Judge_Name')} / {case_data.get('Court_Name')}
+    - Public Prosecutor: {case_data.get('PP_Name')}
+    - Registration Date: {case_data.get('Date_of_Registration')}
+    - Chargesheet Date: {case_data.get('Date_of_Chargesheet')}
+    - Judgement Date: {case_data.get('Date_of_Judgement')}
+    - FIR Contents: {case_data.get('FIR_Contents')}
+    - Action Taken by IO: {case_data.get('Action_Taken')}
+    - Reason for Delay in FIR: {case_data.get('Delay_Reason', 'N/A')}
+    """
+
+    # --- 3. Create the sophisticated prompt ---
+    prompt = f"""
+    You are an expert police analyst. Your task is to provide actionable insights on the following case.
+    Do not just list the data; analyze it. Identify potential gaps, officer performance, and judicial patterns.
+    Format your response in HTML.
+
+    **Case Data:**
+    {data_string}
+
+    **Analysis:**
+
+    **1. Brief Summary:**
+    (Provide a 1-2 sentence overview: who, what, when, and the outcome.)
+
+    **2. Key Timeline & Durations:**
+    (Analyze the pre-calculated durations. Was the investigation or trial notably fast or slow?)
+    - **Investigation Duration (Reg to Chargesheet):** {investigation_duration}
+    - **Trial Duration (Chargesheet to Judgement):** {trial_duration}
+    - **Any noted delays:** {case_data.get('Delay_Reason', 'N/A')}
+
+    **3. Investigative Insights & Gaps:**
+    (Analyze the IO's actions, FIR, and evidence. What was done well? Are there clear gaps or missed opportunities? Was the 'Action Taken' standard for this 'Crime Type'?)
+
+    **4. Judicial & Outcome Analysis:**
+    (Analyze the result. What factors (IO, PP, Judge, evidence) likely led to this {case_data.get('Result')}? Are there noteworthy patterns?)
+    """
+
+    # --- 4. Call the RAG service ---
+    try:
         # Use the default model provider from settings
         default_provider = settings.DEFAULT_LLM_PROVIDER
 
         response = await rag_service.ask_generic(prompt, default_provider)
+
         # Assuming response is {'response': '... summary ...'}
-        return response.get("response", "Summary generation failed.")
+        return response.get("response", "AI summary generation failed.")
 
     except Exception as e:
         log.error(f"AI summary generation failed: {e}. Falling back to basic summary.")
-
-    # Fallback summary (mimics old frontend mock)
-    return f"""
-    <p>This case (<strong>{case_data.get('Case_Number', 'N/A')}</strong>) involves <strong>{case_data.get('Accused_Name', 'N/A')}</strong> regarding <strong>{case_data.get('Sections_of_Law', 'N/A')}</strong>.</p>
-    <ul class="list-disc pl-5 mt-2">
-      <li><strong>Judgement:</strong> The final judgement was <strong>{case_data.get('Result', 'N/A')}</strong>.</li>
-      <li><strong>Investigating Officer:</strong> {case_data.get('Investigating_Officer', 'N/A')}</li>
-    </ul>
-    """
+        return f"<p>Case: <strong>{case_data.get('Case_Number')}</strong></p><p>Accused: <strong>{case_data.get('Accused_Name')}</strong></p><p>Result: <strong>{case_data.get('Result')}</strong></p><p>Error: AI summary failed.</p>"
 
 
 @router.get("/{case_mongo_id}", summary="Get a single full case by its MongoDB ID")
@@ -378,7 +428,7 @@ async def get_full_case(
     if case is None:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    # ... (Role-based access check - UNCHANGED) ...
+    # Role-based access check
     if current_user.role == UserRole.SP:
         if case.get("District") != current_user.district:
             raise HTTPException(

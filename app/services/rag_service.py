@@ -21,9 +21,9 @@ LEGAL_INDEX_NAME = "legal_vector_index"
 CASE_COLLECTION_NAME = "conviction_cases"
 CASE_INDEX_NAME = "case_vector_index"
 
-OLLAMA_BASE_URL = "http://localhost:11434"  # Connects to your Docker container
+OLLAMA_BASE_URL = settings.OLLAMA_BASE_URL
 PHI3_MODEL = "phi3:3.8b-mini-instruct-4k-q4_K_M"
-GEMINI_MODEL = "gemini-1.5-flash-latest"
+GEMINI_MODEL = "gemini-2.0-flash"
 
 
 class RAGService:
@@ -193,6 +193,34 @@ class RAGService:
         return await self._run_rag_chain(
             query, model_provider, self.case_retriever, CASE_PROMPT
         )
+
+    async def ask_generic(self, prompt_string: str, model_provider: str) -> dict:
+        """
+        Runs a generic prompt directly against an LLM, bypassing RAG.
+        Used for tasks like summarization where context is already provided.
+        """
+        try:
+            log.info(f"Invoking generic LLM chain with model: {model_provider}...")
+            llm = self._get_llm(model_provider)
+
+            # Directly invoke the LLM with the provided prompt string
+            answer = await llm.ainvoke(prompt_string)
+
+            # The answer object from ChatGoogleGenerativeAI or OllamaLLM
+            # has a 'content' attribute for the string response.
+            response_content = (
+                answer.content if hasattr(answer, "content") else str(answer)
+            )
+
+            return {
+                "response": response_content,
+                "model_used": model_provider,
+            }
+        except Exception as e:
+            log.error(f"Error in ask_generic: {e}")
+            raise HTTPException(
+                status_code=500, detail=f"Error processing generic LLM request: {e}"
+            )
 
 
 # --- Create a single, reusable service instance ---
