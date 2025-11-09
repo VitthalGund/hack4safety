@@ -1,23 +1,22 @@
 {% extends "report_base.html" %} {% block content %}
-
-<h2>I. Executive Summary: District Performance</h2>
+<h2>Executive Summary: {{ district }}</h2>
 <div class="kpi-container">
   <div class="kpi-item">
     <div class="kpi-value">{{ kpis.conviction_rate | round(1) }}%</div>
     <div class="kpi-label">District Conviction Rate</div>
   </div>
   <div class="kpi-item">
-    <div class="kpi-value">{{ kpis.avg_lifecycle_days | round(1) }}</div>
+    <div class="kpi-value">{{ kpis.avg_lifecycle_days | round(0) }}</div>
     <div class="kpi-label">Avg. Case Lifecycle (Days)</div>
   </div>
   <div class="kpi-item">
-    <div class="kpi-value">{{ kpis.avg_investigation_days | round(1) }}</div>
+    <div class="kpi-value">{{ kpis.avg_investigation_days | round(0) }}</div>
     <div class="kpi-label">Avg. Investigation (Days)</div>
   </div>
 </div>
 
-<h2>II. Tactical Performance Hotspots</h2>
-<p>Top 5 Performing Investigating Officers by Conviction Rate.</p>
+<h2>Tactical Performance Hotspots</h2>
+<p>Top 5 Performing Investigating Officers (District-Wide Data)</p>
 <table>
   <thead>
     <tr>
@@ -39,19 +38,22 @@
     </tr>
     {% else %}
     <tr>
-      <td colspan="5">No ranking data available.</td>
+      <td colspan="5" style="text-align: center">No ranking data available.</td>
     </tr>
     {% endfor %}
   </tbody>
 </table>
 
-<h2>IV. AI-Driven Gaps & Correction (Example)</h2>
-<p>This chart shows the top reasons for acquittals in your district.</p>
+<h2>AI-Driven Gaps & Correction</h2>
+<p>Top reasons for acquittals in {{ district }}.</p>
 <div class="chart">
+  {% if acquittal_chart_base64 %}
   <img
     src="data:image/png;base64,{{ acquittal_chart_base64 }}"
     alt="Acquittal Reasons Chart"
   />
+  {% else %}
+  <p>No acquittal data available to generate chart.</p>
+  {% endif %}
 </div>
-
 {% endblock %}

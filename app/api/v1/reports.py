@@ -1,10 +1,11 @@
 import logging
 import io
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pymongo.database import Database
 from app.db.session import get_mongo_db
-from app.services.report_service import ReportService
+from app.services.report_service import ReportService  # We will create this
 from app.api.v1.auth import get_current_user
 from app.models.user_schema import User
 
@@ -26,19 +27,24 @@ async def generate_report_endpoint(
 ):
     """
     Generates a PDF report tailored to the user's role.
-    - **sp**: Generates a district-level report.
-    - **dgp**: Generates a state-level strategic report.
-    - **home**: Generates a policy and infrastructure report.
+    - **sp**: Generates a district-level report (SP).
+    - **dgp**: Generates a state-level strategic report (DGP).
+    - **home**: Generates a policy and infrastructure report (Home Dept).
     """
 
     # Use the user's district if they are an SP
     user_district = None
     if role == "sp":
-        if current_user.district:
+        # SP role is 'district' or 'police' in your schema
+        if current_user.role in ("district", "police"):
+            if not current_user.district:
+                raise HTTPException(
+                    status_code=403, detail="User has no district assigned."
+                )
             user_district = current_user.district
-        else:
+        elif current_user.role != "admin":
             raise HTTPException(
-                status_code=403, detail="SP user has no district assigned."
+                status_code=403, detail="User does not have permission for SP report."
             )
 
     try:
