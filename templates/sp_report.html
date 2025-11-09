@@ -1,0 +1,57 @@
+{% extends "report_base.html" %} {% block content %}
+
+<h2>I. Executive Summary: District Performance</h2>
+<div class="kpi-container">
+  <div class="kpi-item">
+    <div class="kpi-value">{{ kpis.conviction_rate | round(1) }}%</div>
+    <div class="kpi-label">District Conviction Rate</div>
+  </div>
+  <div class="kpi-item">
+    <div class="kpi-value">{{ kpis.avg_lifecycle_days | round(1) }}</div>
+    <div class="kpi-label">Avg. Case Lifecycle (Days)</div>
+  </div>
+  <div class="kpi-item">
+    <div class="kpi-value">{{ kpis.avg_investigation_days | round(1) }}</div>
+    <div class="kpi-label">Avg. Investigation (Days)</div>
+  </div>
+</div>
+
+<h2>II. Tactical Performance Hotspots</h2>
+<p>Top 5 Performing Investigating Officers by Conviction Rate.</p>
+<table>
+  <thead>
+    <tr>
+      <th>Rank</th>
+      <th>Officer Name</th>
+      <th>Officer Rank</th>
+      <th>Total Cases</th>
+      <th>Conviction Rate</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for item in rankings %}
+    <tr>
+      <td>{{ loop.index }}</td>
+      <td>{{ item.officer_name }}</td>
+      <td>{{ item.rank }}</td>
+      <td>{{ item.total_cases }}</td>
+      <td>{{ (item.conviction_rate * 100) | round(1) }}%</td>
+    </tr>
+    {% else %}
+    <tr>
+      <td colspan="5">No ranking data available.</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>IV. AI-Driven Gaps & Correction (Example)</h2>
+<p>This chart shows the top reasons for acquittals in your district.</p>
+<div class="chart">
+  <img
+    src="data:image/png;base64,{{ acquittal_chart_base64 }}"
+    alt="Acquittal Reasons Chart"
+  />
+</div>
+
+{% endblock %}
