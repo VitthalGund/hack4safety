@@ -1,15 +1,16 @@
 import logging
 from datetime import datetime, timedelta
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Response
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy import select
 from pydantic import BaseModel
 from jose import JWTError, jwt
-from bcrypt import hashpw, gensalt, checkpw, _bcrypt
+from bcrypt import hashpw, gensalt, checkpw
 
-from app.models.user_schema import User, UserRole, Base
+from app.models.user_schema import User, UserRole, Base, Agent
 from app.db.session import get_pg_session, db
 from app.core.config import settings
 from typing import Optional
@@ -21,6 +22,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
 
 class Token(BaseModel):
     access_token: str
+    refresh_token: str
     token_type: str
 
 
@@ -46,6 +48,7 @@ def get_password_hash(password: str) -> str:
     return hashpw(password.encode("utf-8"), gensalt(12)).decode("utf-8")
 
 
+# --- FIX: Updated create_access_token to be specific ---
 def create_access_token(data: dict, expires_delta: timedelta | None = None):
     to_encode = data.copy()
     if expires_delta:
@@ -54,13 +57,30 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
         expire = datetime.utcnow() + timedelta(
             minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
         )
-    to_encode.update({"exp": expire})
+    to_encode.update({"exp": expire, "type": "access"})  # Add token type
     encoded_jwt = jwt.encode(
         to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM
     )
     return encoded_jwt
 
 
+# --- FIX: Added create_refresh_token ---
+def create_refresh_token(data: dict, expires_delta: timedelta | None = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(
+            minutes=settings.REFRESH_TOKEN_EXPIRE_MINUTES
+        )
+    to_encode.update({"exp": expire, "type": "refresh"})  # Add token type
+    encoded_jwt = jwt.encode(
+        to_encode, settings.JWT_REFRESH_SECRET_KEY, algorithm=settings.JWT_ALGORITHM
+    )
+    return encoded_jwt
+
+
+# (on_startup and create_default_admin remain the same)
 async def create_default_admin():
     """
     Checks for a default admin user on startup and creates one
@@ -80,7 +100,6 @@ async def create_default_admin():
                 select(User).where(User.username == settings.DEFAULT_ADMIN_USER)
             )
             admin_user = result.scalars().first()
-
             if admin_user:
                 log.info(
                     f"Default admin user '{settings.DEFAULT_ADMIN_USER}' already exists."
@@ -93,16 +112,14 @@ async def create_default_admin():
                     "DEFAULT_ADMIN_USER or DEFAULT_ADMIN_PASS not set. Cannot create default admin."
                 )
                 return
-
             log.info(f"Creating default admin user: {settings.DEFAULT_ADMIN_USER}")
-
             hashed_password = get_password_hash(settings.DEFAULT_ADMIN_PASS)
             default_admin = User(
                 username=settings.DEFAULT_ADMIN_USER,
                 hashed_password=hashed_password,
                 full_name="Default Admin",
                 role=UserRole.ADMIN,
-                district="STATE_HQ",  # Or any default
+                district="STATE_HQ",
             )
             session.add(default_admin)
             await session.commit()
@@ -114,7 +131,7 @@ async def create_default_admin():
 
 @router.on_event("startup")
 async def on_startup():
-    """Create all tables (User, Agent) on startup."""
+    """Create all tables (User, Agent, Alert) on startup."""
     async with db.pg_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -142,17 +159,85 @@ async def login_for_access_token(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    # --- FIX: Create both access and refresh tokens ---
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    refresh_token_expires = timedelta(minutes=settings.REFRESH_TOKEN_EXPIRE_MINUTES)
+
+    token_data = {"sub": user.username, "role": user.role.value}
+
     access_token = create_access_token(
-        data={"sub": user.username, "role": user.role.value},
-        expires_delta=access_token_expires,
+        data=token_data, expires_delta=access_token_expires
     )
-    return {"access_token": access_token, "token_type": "bearer"}
+    refresh_token = create_refresh_token(
+        data=token_data, expires_delta=refresh_token_expires
+    )
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+    }
+
+
+# --- FIX: Added /refresh endpoint ---
+@router.post("/refresh", response_model=Token, summary="Refresh an access token")
+async def refresh_access_token(
+    current_refresh_token: str = Depends(
+        oauth2_scheme
+    ),  # Reuse scheme, but this is a refresh token
+    session: AsyncSession = Depends(get_pg_session),
+):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate refresh token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(
+            current_refresh_token,
+            settings.JWT_REFRESH_SECRET_KEY,  # Use refresh secret
+            algorithms=[settings.JWT_ALGORITHM],
+        )
+        if payload.get("type") != "refresh":
+            raise credentials_exception
+
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+        token_data = TokenData(username=username, role=payload.get("role"))
+    except JWTError:
+        raise credentials_exception
+
+    result = await session.execute(
+        select(User).where(User.username == token_data.username)
+    )
+    user = result.scalars().first()
+
+    if user is None:
+        raise credentials_exception
+
+    # Issue new pair of tokens
+    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    refresh_token_expires = timedelta(minutes=settings.REFRESH_TOKEN_EXPIRE_MINUTES)
+
+    token_data = {"sub": user.username, "role": user.role.value}
+
+    access_token = create_access_token(
+        data=token_data, expires_delta=access_token_expires
+    )
+    refresh_token = create_refresh_token(
+        data=token_data, expires_delta=refresh_token_expires
+    )
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+    }
 
 
 async def get_current_user(
-    token: str = Depends(oauth2_scheme),
-    session: AsyncSession = Depends(get_pg_session),
+    token: str = Depends(oauth2_scheme), session: AsyncSession = Depends(get_pg_session)
 ):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -180,8 +265,46 @@ async def get_current_user(
     return user
 
 
+# --- FIX: Renamed to get_current_user_from_access_token ---
+async def get_current_user_from_access_token(
+    token: str = Depends(oauth2_scheme),
+    session: AsyncSession = Depends(get_pg_session),
+):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(
+            token,
+            settings.JWT_SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM],  # Use access secret
+        )
+        if payload.get("type") != "access":  # Check token type
+            raise credentials_exception
+
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+        token_data = TokenData(username=username, role=payload.get("role"))
+    except JWTError:
+        raise credentials_exception
+
+    result = await session.execute(
+        select(User).where(User.username == token_data.username)
+    )
+    user = result.scalars().first()
+
+    if user is None:
+        raise credentials_exception
+    return user
+
+
 @router.get("/users/me", summary="Get current user details")
-async def read_users_me(current_user: User = Depends(get_current_user)):
+async def read_users_me(
+    current_user: User = Depends(get_current_user_from_access_token),
+):
     """
     Protected endpoint that returns the details of the logged-in user.
     """
@@ -202,7 +325,7 @@ async def read_users_me(current_user: User = Depends(get_current_user)):
 async def register_user(
     user_in: UserCreate,
     session: AsyncSession = Depends(get_pg_session),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_from_access_token),
 ):
     """
     Create a new user in the database. Only accessible by ADMIN users.

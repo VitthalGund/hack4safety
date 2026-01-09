@@ -5,28 +5,33 @@ from pydantic import BaseModel, Field
 from pymongo.database import Database
 from typing import Dict, Any, List, Optional
 from bson import ObjectId
+from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from app.services.rag_service import rag_service
+from sqlalchemy import select, or_
 
 from app.db.session import get_mongo_db, get_pg_session
 from app.pqc.secure_server import server_core as pqc_server
 from app.api.v1.auth import get_current_user
-from app.models.user_schema import User, UserRole, Agent
-from app.core.embedding import embeddings_client  # <-- Import shared embedder
+from app.models.user_schema import (
+    User,
+    UserRole,
+    Agent,
+    Alert,
+)  # Added UserRole, Agent, Alert
+from app.core.embedding import embeddings_client
+from app.core.config import settings
 
 router = APIRouter()
 log = logging.getLogger(__name__)
 
+
 # --- Helper Function for Case RAG ---
-
-
+# ... (This function is unchanged from the previous step)
 def _create_case_embedding(case_data: dict) -> List[float]:
-    """Combines key case fields into a single text block and embeds it."""
     if not embeddings_client:
         log.error("Embedding client not loaded. Cannot create case embedding.")
         return []
-
-    # Combine the most descriptive fields for RAG
     text_to_embed = f"""
     Case Number: {case_data.get('Case_Number', '')}
     District: {case_data.get('District', '')}
@@ -38,14 +43,11 @@ def _create_case_embedding(case_data: dict) -> List[float]:
     Action Taken: {case_data.get('Action_Taken', '')}
     Result: {case_data.get('Result', '')}
     """
-
     embedding = embeddings_client.embed_query(text_to_embed)
     return embedding
 
 
-# --- Pydantic Models ---
-
-
+# ... (SecureWirePackage, CaseOut, CaseFieldUpdate models are unchanged) ...
 class SecureWirePackage(BaseModel):
     agent_id: str
     key_id: int
@@ -67,13 +69,31 @@ class CaseOut(BaseModel):
     Result: str
 
     class Config:
-        populate_by_name = True
-        json_encoders = {ObjectId: str}
+        orm_mode = True
 
 
 class CaseFieldUpdate(BaseModel):
     field_name: str = Field(..., description="The exact name of the field to update.")
     field_value: Any = Field(..., description="The new value for the field.")
+
+
+# --- NEW: Pydantic models for Feature 2 ---
+class DocumentOut(BaseModel):
+    case_mongo_id: str
+    document_type: str
+    name: str
+    storage_url: str
+    uploaded_at: str
+
+
+class GlobalSearchResult(BaseModel):
+    type: str
+    id: str
+    name: str
+    context: str
+
+
+# --- Endpoints ---
 
 
 @router.post("/secure_ingest", summary="Receive a PQC-secured conviction record")
@@ -91,7 +111,6 @@ async def secure_ingest_case(
         raise HTTPException(
             status_code=503, detail="Embedding service is not available."
         )
-
     try:
         # 1. Fetch agent's public key from PostgreSQL
         result = await pg_session.execute(
@@ -114,7 +133,6 @@ async def secure_ingest_case(
             package.model_dump(), agent.dilithium_pk
         )
         if result.get("status") != "ok":
-            log.warning(f"Ingestion failed: {result.get('error')}")
             raise HTTPException(
                 status_code=400, detail=f"PQC processing failed: {result.get('error')}"
             )
@@ -128,10 +146,10 @@ async def secure_ingest_case(
                 detail="Data integrity error: Decrypted payload is not valid JSON.",
             )
 
-        # 3. --- NEW RAG STEP: Create Embedding ---
+        # 3. Create Embedding
         case_data["case_embedding"] = _create_case_embedding(case_data)
 
-        # 4. Save the data (with embedding) to MongoDB
+        # 4. Save to MongoDB
         collection = db["conviction_cases"]
         insert_result = collection.insert_one(case_data)
 
@@ -144,10 +162,92 @@ async def secure_ingest_case(
             "case_number": case_data.get("Case_Number"),
             "mongo_id": str(insert_result.inserted_id),
         }
-
     except Exception as e:
         log.error(f"Error in secure_ingest endpoint: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- NEW: Global Search Endpoint (Feature 2) ---
+@router.get(
+    "/search/global",
+    response_model=List[GlobalSearchResult],
+    summary="Global federated search",
+)
+async def search_global(
+    q: str = Query(..., min_length=3, description="Global search query"),
+    db: Database = Depends(get_mongo_db),
+    pg_session: AsyncSession = Depends(get_pg_session),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Performs a federated search across cases, personnel, and accused.
+    """
+    results: List[GlobalSearchResult] = []
+
+    # 1. Search Cases (MongoDB Text Search)
+    case_query = {"$text": {"$search": q}}
+    # Apply role-based filtering
+    if current_user.role == UserRole.SP:
+        case_query["District"] = current_user.district
+    elif current_user.role == UserRole.IIC:
+        case_query["Police_Station"] = current_user.police_station
+
+    case_cursor = (
+        db["conviction_cases"]
+        .find(case_query, {"Case_Number": 1, "District": 1, "Police_Station": 1})
+        .limit(5)
+    )
+
+    for case in case_cursor:
+        results.append(
+            GlobalSearchResult(
+                type="Case",
+                id=str(case["_id"]),
+                name=case["Case_Number"],
+                context=f"{case.get('District', '')} / {case.get('Police_Station', '')}",
+            )
+        )
+
+    # 2. Search Personnel (Postgres)
+    personnel_query = (
+        select(User)
+        .where(
+            User.full_name.ilike(f"%{q}%"),
+            User.role.in_(
+                [UserRole.IIC, UserRole.SP, UserRole.SDPO]
+            ),  # Only search for officers
+        )
+        .limit(5)
+    )
+
+    pg_result = await pg_session.execute(personnel_query)
+    for user in pg_result.scalars().all():
+        results.append(
+            GlobalSearchResult(
+                type="Personnel",
+                id=str(user.id),
+                name=user.full_name,
+                context=f"{user.role.value} / {user.district or user.police_station}",
+            )
+        )
+
+    # 3. Search Accused (MongoDB Distinct)
+    accused_query = {"Accused_Name": {"$regex": q, "$options": "i"}}
+    if current_user.role == UserRole.SP:
+        accused_query["District"] = current_user.district
+    elif current_user.role == UserRole.IIC:
+        accused_query["Police_Station"] = current_user.police_station
+
+    accused_names = db["conviction_cases"].distinct("Accused_Name", accused_query)
+
+    for name in accused_names[:5]:  # Limit to 5
+        results.append(
+            GlobalSearchResult(
+                type="Accused", id=name, name=name, context="Accused Person"
+            )
+        )
+
+    return results
 
 
 @router.get(
@@ -172,7 +272,6 @@ async def search_cases(
     Access is restricted based on the user's role.
     """
     query: Dict[str, Any] = {}
-
     if sections_of_law:
         query["Sections_of_Law"] = {"$regex": sections_of_law, "$options": "i"}
     if accused_name:
@@ -206,17 +305,107 @@ async def search_cases(
     log.info(
         f"User '{current_user.username}' (Role: {current_user.role}) searching with query: {query}"
     )
-
     collection = db["conviction_cases"]
     cases_cursor = collection.find(query, {"case_embedding": 0}).limit(
         limit
     )  # Exclude embedding
-
     results = []
     for case in cases_cursor:
         case["_id"] = str(case["_id"])
         results.append(case)
     return results
+
+
+# --- FIX: New, sophisticated helper function for AI summary ---
+async def _generate_case_summary(case_data: dict) -> str:
+    """
+    Generates an in-depth analytical summary for a case document.
+    Uses the RAG service to identify insights, gaps, and key patterns.
+    """
+    if not rag_service:
+        log.warning(
+            f"RAG service not available, generating simple summary for {case_data.get('Case_Number')}."
+        )
+        # Fallback to a very basic summary if RAG service fails
+        return f"<p>Case: <strong>{case_data.get('Case_Number')}</strong></p><p>Accused: <strong>{case_data.get('Accused_Name')}</strong></p><p>Result: <strong>{case_data.get('Result')}</strong></p>"
+
+    # --- 1. Pre-calculate durations ---
+    investigation_duration = "N/A"
+    trial_duration = "N/A"
+    try:
+        reg_date = datetime.fromisoformat(case_data.get("Date_of_Registration", ""))
+        cs_date = datetime.fromisoformat(case_data.get("Date_of_Chargesheet", ""))
+        judge_date = datetime.fromisoformat(case_data.get("Date_of_Judgement", ""))
+
+        if reg_date and cs_date:
+            investigation_duration = f"{(cs_date - reg_date).days} days"
+        if cs_date and judge_date:
+            trial_duration = f"{(judge_date - cs_date).days} days"
+    except Exception:
+        pass  # Dates may be missing or invalid
+
+    # --- 2. Create a comprehensive data string for the prompt ---
+    # Select key fields for analysis
+    data_string = f"""
+    - Case Number: {case_data.get('Case_Number')}
+    - District/PS: {case_data.get('District')} / {case_data.get('Police_Station')}
+    - Crime Type: {case_data.get('Crime_Type')}
+    - Sections: {case_data.get('Sections_of_Law')}
+    - Investigating Officer (IO): {case_data.get('Investigating_Officer')} ({case_data.get('Rank')})
+    - Accused: {case_data.get('Accused_Name')} (Age: {case_data.get('Age')}, Gender: {case_data.get('Gender')})
+    - Complainant: {case_data.get('Complainant_Informant')}
+    - Result: {case_data.get('Result')}
+    - Sentence: {case_data.get('Sentence_Type', 'N/A')}
+    - Judge/Court: {case_data.get('Judge_Name')} / {case_data.get('Court_Name')}
+    - Public Prosecutor: {case_data.get('PP_Name')}
+    - Registration Date: {case_data.get('Date_of_Registration')}
+    - Chargesheet Date: {case_data.get('Date_of_Chargesheet')}
+    - Judgement Date: {case_data.get('Date_of_Judgement')}
+    - FIR Contents: {case_data.get('FIR_Contents')}
+    - Action Taken by IO: {case_data.get('Action_Taken')}
+    - Reason for Delay in FIR: {case_data.get('Delay_Reason', 'N/A')}
+    """
+
+    # --- 3. Create the sophisticated prompt ---
+    prompt = f"""
+    You are an expert police analyst. Your task is to provide actionable insights on the following case.
+    Do not just list the data; analyze it. Identify potential gaps, officer performance, and judicial patterns.
+    Format your response in HTML.
+
+    **Case Data:**
+    {data_string}
+
+    **Analysis:**
+
+    **1. Brief Summary:**
+    (Provide a 1-2 sentence overview: who, what, when, and the outcome.)
+
+    **2. Key Timeline & Durations:**
+    (Analyze the pre-calculated durations. Was the investigation or trial notably fast or slow?)
+    - **Investigation Duration (Reg to Chargesheet):** {investigation_duration}
+    - **Trial Duration (Chargesheet to Judgement):** {trial_duration}
+    - **Any noted delays:** {case_data.get('Delay_Reason', 'N/A')}
+
+    **3. Investigative Insights & Gaps:**
+    (Analyze the IO's actions, FIR, and evidence. What was done well? Are there clear gaps or missed opportunities? Was the 'Action Taken' standard for this 'Crime Type'?)
+
+    **4. Judicial & Outcome Analysis:**
+    (Analyze the result. What factors (IO, PP, Judge, evidence) likely led to this {case_data.get('Result')}? Are there noteworthy patterns?)
+    """
+
+    # --- 4. Call the RAG service ---
+    try:
+        # Use the default model provider from settings
+        default_provider = settings.DEFAULT_LLM_PROVIDER
+
+        response = await rag_service.ask_generic(prompt, default_provider)
+
+        # Assuming response is {'response': '... summary ...'}
+        return response.get("response", "AI summary generation failed.")
+
+    except Exception as e:
+        log.error(f"AI summary generation failed: {e}. Falling back to basic summary.")
+        return f"<p>Case: <strong>{case_data.get('Case_Number')}</strong></p><p>Accused: <strong>{case_data.get('Accused_Name')}</strong></p><p>Result: <strong>{case_data.get('Result')}</strong></p><p>Error: AI summary failed.</p>"
 
 
 @router.get("/{case_mongo_id}", summary="Get a single full case by its MongoDB ID")
@@ -226,7 +415,7 @@ async def get_full_case(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Retrieves the full details for a single case.
+    Retrieves the full details for a single case, including an AI-generated summary.
     Access is restricted based on the user's role.
     """
     try:
@@ -236,7 +425,6 @@ async def get_full_case(
 
     collection = db["conviction_cases"]
     case = collection.find_one({"_id": obj_id})
-
     if case is None:
         raise HTTPException(status_code=404, detail="Case not found")
 
@@ -254,7 +442,14 @@ async def get_full_case(
                 detail="Access denied: Case is not in your police station.",
             )
 
+    # --- FIX: Generate and add summary ---
+    case["Summary"] = await _generate_case_summary(case)
+
     case["_id"] = str(case["_id"])
+
+    # Exclude embedding from the response
+    case.pop("case_embedding", None)
+
     return case
 
 
@@ -263,17 +458,18 @@ async def update_case_field(
     case_mongo_id: str,
     update_data: CaseFieldUpdate,
     db: Database = Depends(get_mongo_db),
+    pg_session: AsyncSession = Depends(get_pg_session),  # <-- ADDED
     current_user: User = Depends(get_current_user),
 ):
     """
     Updates a single field in a case document.
     If a RAG-related field is updated, this regenerates the case embedding.
+    If 'Result' is updated, this triggers an Alert (Feature 7).
     """
     if not embeddings_client:
         raise HTTPException(
             status_code=503, detail="Embedding service is not available."
         )
-
     try:
         obj_id = ObjectId(case_mongo_id)
     except Exception:
@@ -294,9 +490,10 @@ async def update_case_field(
         current_user.role == UserRole.IIC
         and case.get("Police_Station") != current_user.police_station
     ):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="Access denied."
-        )
+        if current_user.role not in [UserRole.ADMIN]:  # Only Admin can bypass
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Access denied."
+            )
 
     # 3. Set the new field value
     update_payload = {"$set": {update_data.field_name: update_data.field_value}}
@@ -321,16 +518,92 @@ async def update_case_field(
     # 5. Perform the update
     result = collection.update_one({"_id": obj_id}, update_payload)
 
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Case not found during update.")
+    # 6. --- NEW: Alert Trigger (Feature 7) ---
+    if update_data.field_name == "Result" and update_data.field_value in [
+        "Conviction",
+        "Acquitted",
+    ]:
+        await create_alert_for_case_update(
+            pg_session, case, update_data.field_value, str(obj_id)
+        )
 
-    return {
-        "status": "updated",
-        "matched_count": result.matched_count,
-        "modified_count": result.modified_count,
-    }
+    return {"status": "updated", "modified_count": result.modified_count}
 
 
+# --- NEW: Document Endpoint (Feature 2) ---
+@router.get(
+    "/{case_mongo_id}/documents",
+    response_model=List[DocumentOut],
+    summary="Get documents for a single case",
+)
+async def get_case_documents(
+    case_mongo_id: str,
+    db: Database = Depends(get_mongo_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Retrieves a list of all associated documents (like FIRs, Chargesheets)
+    for a single case.
+    """
+    # Note: We must also check if the user has access to the *case* itself.
+    # We can re-use the get_full_case logic.
+    await get_full_case(case_mongo_id, db, current_user)
+
+    # Logic assumes a new collection "case_documents"
+    collection = db["case_documents"]
+    documents = list(collection.find({"case_mongo_id": case_mongo_id}))
+
+    # Convert _id
+    for doc in documents:
+        doc["id"] = str(doc["_id"])
+
+    return documents
+
+
+# --- NEW: Helper for Alert Trigger (Feature 7) ---
+async def create_alert_for_case_update(
+    pg_session: AsyncSession, case: dict, new_result: str, case_mongo_id: str
+):
+    """
+    Finds relevant users (IO, SP) and creates a new Alert in Postgres.
+    """
+    try:
+        io_name = case.get("Investigating_Officer")
+        district = case.get("District")
+        case_number = case.get("Case_Number")
+
+        # Find users who are either the IO for this case OR the SP for this district
+        user_query = select(User).where(
+            or_(
+                User.full_name == io_name,
+                (User.role == UserRole.SP and User.district == district),
+            )
+        )
+        users_to_alert = (await pg_session.execute(user_query)).scalars().all()
+
+        if not users_to_alert:
+            log.warning(f"No users found to alert for case {case_number}")
+            return
+
+        alerts = []
+        for user in users_to_alert:
+            new_alert = Alert(
+                user_id=user.id,
+                message=f"Case {case_number} has been updated. New result: {new_result}",
+                link_to=f"/app/cases/{case_mongo_id}",  # Frontend link
+            )
+            alerts.append(new_alert)
+
+        pg_session.add_all(alerts)
+        await pg_session.commit()
+        log.info(f"Created {len(alerts)} alerts for case {case_number} update.")
+
+    except Exception as e:
+        log.error(f"Failed to create alert: {e}")
+        await pg_session.rollback()
+
+
+# ... (delete_case endpoint is unchanged) ...
 @router.delete("/{case_mongo_id}", summary="Delete a case document")
 async def delete_case(
     case_mongo_id: str,

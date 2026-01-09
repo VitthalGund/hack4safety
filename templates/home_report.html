@@ -1,0 +1,44 @@
+{% extends "report_base.html" %} {% block content %}
+<h2>Policy Impact Summary</h2>
+<div class="kpi-container">
+  <div class="kpi-item">
+    <div class="kpi-value">{{ kpis.conviction_rate | round(1) }}%</div>
+    <div class="kpi-label">State-wide Conviction Rate</div>
+  </div>
+  <div class="kpi-item">
+    <div class="kpi-value">{{ kpis.avg_lifecycle_days | round(0) }}</div>
+    <div class="kpi-label">Avg. Case Lifecycle (Days)</div>
+  </div>
+  <div class="kpi-item">
+    <div class="kpi-value">{{ kpis.avg_trial_days | round(0) }}</div>
+    <div class="kpi-label">Avg. Trial Duration (Days)</div>
+  </div>
+</div>
+
+<h2>Resource & Infrastructure Justification</h2>
+<p>Top 10 Courts by Case Load.</p>
+<table>
+  <thead>
+    <tr>
+      <th>Rank</th>
+      <th>Court Name</th>
+      <th>Total Cases</th>
+      <th>Conviction Rate</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for item in bottlenecks %}
+    <tr>
+      <td>{{ loop.index }}</td>
+      <td>{{ item._id }}</td>
+      <td>{{ item.total_cases }}</td>
+      <td>{{ (item.conviction_rate * 100) | round(1) }}%</td>
+    </tr>
+    {% else %}
+    <tr>
+      <td colspan="4" style="text-align: center">No data available.</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
