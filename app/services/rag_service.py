@@ -23,7 +23,7 @@ CASE_INDEX_NAME = "case_vector_index"
 
 OLLAMA_BASE_URL = "http://localhost:11434"  # Connects to your Docker container
 PHI3_MODEL = "phi3:3.8b-mini-instruct-4k-q4_K_M"
-GEMINI_MODEL = "gemini-1.5-flash-latest"
+GEMINI_MODEL = "gemini-flash-lite-latest"
 
 
 class RAGService:
